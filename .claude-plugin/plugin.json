@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "groundfetch",
+  "displayName": "GroundFetch",
+  "version": "0.1.0",
+  "description": "Lightweight grounded web search for coding agents.",
+  "author": {
+    "name": "clavulin",
+    "email": "clavulin@users.noreply.github.com",
+    "url": "https://github.com/clavulin"
+  },
+  "homepage": "https://github.com/clavulin/groundfetch",
+  "repository": "https://github.com/clavulin/groundfetch",
+  "license": "MIT",
+  "keywords": ["grounded-search", "web-search", "gemini", "google-search", "agents", "codex", "claude-code"]
+}

@@ -70,18 +70,51 @@ Example output:
 }
 ```
 
-## Codex Skill
+## Agent Skill
 
-The repo includes a Codex skill at `skills/groundfetch`.
+The repo ships one tool-neutral skill at `skills/groundfetch/`. Codex and Claude
+Code read the same `SKILL.md`; each ignores the other's extra files, so there is
+only one copy of the instructions to maintain.
 
-Install it by copying or symlinking that directory into your Codex skills
-directory:
+### Codex
+
+Symlink the skill into your Codex skills directory, then invoke it with
+`$groundfetch`:
 
 ```bash
 ln -s "$PWD/skills/groundfetch" ~/.codex/skills/groundfetch
 ```
 
-Then invoke it with `$groundfetch`.
+Codex-specific interface and policy live in `skills/groundfetch/agents/openai.yaml`.
+
+### Claude Code
+
+Quickest path — install the single skill at user scope (available in every
+project). Claude auto-triggers it from the skill `description`:
+
+```bash
+ln -s "$PWD/skills/groundfetch" ~/.claude/skills/groundfetch
+```
+
+Or load the whole repo as a Claude Code plugin via `.claude-plugin/plugin.json`,
+which auto-discovers the skill under `skills/`:
+
+```bash
+claude --plugin-dir "$PWD"   # loads the plugin for the current session
+```
+
+For a persistent, shareable install, the repo doubles as a single-plugin
+marketplace (`.claude-plugin/marketplace.json`). Add it from GitHub, then
+install:
+
+```bash
+claude plugin marketplace add clavulin/groundfetch
+claude plugin install groundfetch@clavulin
+```
+
+Plugin skills are namespaced, so the skill is invoked as `groundfetch:groundfetch`
+(or auto-triggered from its `description`). See the
+[Claude Code plugin docs](https://code.claude.com/docs/en/plugins-reference).
 
 ## Environment Contract
 

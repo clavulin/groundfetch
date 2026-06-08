@@ -9,3 +9,7 @@ venv/
 dist/
 build/
 .env
+
+# Local agent/tool state — not for the repo
+.omc/
+.omx/

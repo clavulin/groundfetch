@@ -1,0 +1,18 @@
+{
+  "name": "clavulin",
+  "owner": {
+    "name": "clavulin",
+    "email": "clavulin@users.noreply.github.com"
+  },
+  "description": "GroundFetch — lightweight grounded web search for coding agents.",
+  "plugins": [
+    {
+      "name": "groundfetch",
+      "source": "./",
+      "description": "Lightweight grounded web search for coding agents.",
+      "homepage": "https://github.com/clavulin/groundfetch",
+      "license": "MIT",
+      "keywords": ["grounded-search", "web-search", "gemini", "agents"]
+    }
+  ]
+}
