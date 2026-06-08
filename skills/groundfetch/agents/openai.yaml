@@ -1,0 +1,7 @@
+interface:
+  display_name: "GroundFetch"
+  short_description: "Lightweight grounded web search"
+  default_prompt: "Use $groundfetch to find current source-backed web results."
+
+policy:
+  allow_implicit_invocation: true
