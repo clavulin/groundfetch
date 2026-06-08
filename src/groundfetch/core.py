@@ -13,6 +13,7 @@ CONFIG_DIR = Path.home() / ".config" / "groundfetch"
 ENV_FILE = CONFIG_DIR / ".env"
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
+DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_TIMEOUT = 30
 DEFAULT_USER_AGENT = "groundfetch/0.1"
 
@@ -71,13 +72,9 @@ class Config:
         except ValueError as exc:
             raise ConfigError(f"GROUNDFETCH_TIMEOUT must be an integer, got {raw_timeout!r}") from exc
 
-        base_url = os.environ.get("GROUNDFETCH_BASE_URL", "").strip().rstrip("/")
-        if not base_url:
-            raise ConfigError(
-                f"GROUNDFETCH_BASE_URL is not set (looked in env and {ENV_FILE}). "
-                "Example: https://generativelanguage.googleapis.com/v1beta"
-            )
-
+        base_url = (
+            os.environ.get("GROUNDFETCH_BASE_URL", "").strip().rstrip("/") or DEFAULT_BASE_URL
+        )
         model = os.environ.get("GROUNDFETCH_MODEL", "").strip() or DEFAULT_MODEL
         user_agent = os.environ.get("GROUNDFETCH_USER_AGENT", "").strip() or DEFAULT_USER_AGENT
         return cls(

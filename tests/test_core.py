@@ -34,14 +34,15 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(core.ConfigError):
                 core.Config.from_env()
 
-    def test_config_requires_groundfetch_base_url(self):
+    def test_config_defaults_groundfetch_base_url(self):
         env = {
             "GROUNDFETCH_API_KEY": "key",
             "OTHER_BASE_URL": "https://ignored.test/v1beta",
         }
         with mock.patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(core.ConfigError):
-                core.Config.from_env()
+            config = core.Config.from_env()
+
+        self.assertEqual(config.base_url, core.DEFAULT_BASE_URL)
 
     def test_dotenv_does_not_override_live_env(self):
         with tempfile.TemporaryDirectory() as tmpdir:

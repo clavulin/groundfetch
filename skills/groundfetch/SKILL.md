@@ -29,7 +29,7 @@ groundfetch --query "search terms" --limit 5
 GroundFetch only reads `GROUNDFETCH_*` settings:
 
 - `GROUNDFETCH_API_KEY`
-- `GROUNDFETCH_BASE_URL`
+- `GROUNDFETCH_BASE_URL` (optional; defaults to `https://generativelanguage.googleapis.com/v1beta`)
 - `GROUNDFETCH_MODEL`
 - `GROUNDFETCH_TIMEOUT`
 - `GROUNDFETCH_USER_AGENT`
@@ -42,4 +42,4 @@ It loads live environment variables, then `~/.config/groundfetch/.env`, then
 - Use concise, source-seeking queries.
 - Keep `--limit` between 1 and 20.
 - Treat `data.web[]` titles and URLs as the source list.
-- If configuration is missing, report the exact blocker instead of guessing.
+- If required configuration is missing, report the exact blocker instead of guessing.

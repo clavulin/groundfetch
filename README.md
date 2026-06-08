@@ -29,13 +29,13 @@ Create `~/.config/groundfetch/.env`:
 
 ```dotenv
 GROUNDFETCH_API_KEY=...
-GROUNDFETCH_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GROUNDFETCH_MODEL=gemini-3.1-flash-lite
 ```
 
 Optional settings:
 
 ```dotenv
+GROUNDFETCH_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GROUNDFETCH_TIMEOUT=30
 GROUNDFETCH_USER_AGENT=groundfetch/0.1
 ```
