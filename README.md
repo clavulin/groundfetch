@@ -107,18 +107,11 @@ GROUNDFETCH_ANTIGRAVITY_AUTH_FILE=~/.cli-proxy-api/antigravity-you@example.com.j
 GROUNDFETCH_MODEL=gemini-3-pro
 ```
 
-If `GROUNDFETCH_ANTIGRAVITY_AUTH_FILE` is omitted, GroundFetch scans
-`~/.cli-proxy-api` for `antigravity*.json`. To use another directory:
-
-```dotenv
-GROUNDFETCH_ANTIGRAVITY_AUTH_DIR=/path/to/auths
-```
-
 Optional Antigravity settings:
 
 ```dotenv
 GROUNDFETCH_ANTIGRAVITY_BASE_URL=https://daily-cloudcode-pa.googleapis.com,https://cloudcode-pa.googleapis.com
-GROUNDFETCH_ANTIGRAVITY_USER_AGENT=antigravity/1.21.9 darwin/arm64
+GROUNDFETCH_ANTIGRAVITY_USER_AGENT=antigravity/2.0.11 darwin/arm64
 GROUNDFETCH_ANTIGRAVITY_CLIENT_ID=your-google-oauth-client-id
 GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET=your-google-oauth-client-secret
 ```

@@ -29,7 +29,7 @@ DEFAULT_TIMEOUT = 30
 DEFAULT_USER_AGENT = "groundfetch/0.1"
 DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT = 10
 DEFAULT_ANTIGRAVITY_AUTH_DIR = Path.home() / ".cli-proxy-api"
-DEFAULT_ANTIGRAVITY_USER_AGENT = "antigravity/1.21.9 darwin/arm64"
+DEFAULT_ANTIGRAVITY_USER_AGENT = "antigravity/2.0.11 darwin/arm64"
 DEFAULT_ANTIGRAVITY_CALLBACK_PORT = 51121
 
 MAX_LIMIT = 20
@@ -181,12 +181,9 @@ class Config:
                 os.environ.get("GROUNDFETCH_PROVIDER", "").strip().lower().replace("-", "_")
             )
         if not provider:
-            explicit_antigravity_dir = bool(
-                os.environ.get("GROUNDFETCH_ANTIGRAVITY_AUTH_DIR", "").strip()
-            )
             if default_provider:
                 provider = default_provider
-            elif antigravity_auth_file or explicit_antigravity_dir:
+            elif antigravity_auth_file:
                 provider = PROVIDER_ANTIGRAVITY
             else:
                 provider = PROVIDER_GEMINI
@@ -451,27 +448,10 @@ def find_antigravity_auth_file(config: Config) -> Path:
     if config.antigravity_auth_file:
         return expand_path(config.antigravity_auth_file)
 
-    auth_dir = expand_path(config.antigravity_auth_dir)
-    try:
-        candidates = sorted(auth_dir.glob("antigravity*.json"))
-    except OSError as exc:
-        raise ConfigError(f"could not list Antigravity auth dir {auth_dir}: {exc}") from exc
-
-    usable: list[Path] = []
-    for candidate in candidates:
-        try:
-            payload = read_json_file(candidate)
-        except ConfigError:
-            continue
-        if normalize(payload.get("type")) == PROVIDER_ANTIGRAVITY:
-            usable.append(candidate)
-
-    if not usable:
-        raise ConfigError(
-            "no Antigravity auth JSON found; set GROUNDFETCH_ANTIGRAVITY_AUTH_FILE "
-            "or run CLIProxyAPI's antigravity login"
-        )
-    return usable[0]
+    raise ConfigError(
+        "GROUNDFETCH_ANTIGRAVITY_AUTH_FILE is required for existing Antigravity auth JSON; "
+        "run groundfetch --login-antigravity to create one"
+    )
 
 
 def parse_rfc3339(value: str) -> datetime | None:

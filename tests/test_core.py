@@ -101,14 +101,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.antigravity_client_id, "client-id")
         self.assertEqual(config.antigravity_client_secret, "client-secret")
 
-    def test_config_auto_selects_antigravity_for_explicit_auth_dir(self):
+    def test_config_does_not_auto_select_antigravity_for_explicit_auth_dir(self):
         env = {
+            "GROUNDFETCH_API_KEY": "key",
             "GROUNDFETCH_ANTIGRAVITY_AUTH_DIR": "/tmp/auths",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             config = core.Config.from_env()
 
-        self.assertEqual(config.provider, core.PROVIDER_ANTIGRAVITY)
+        self.assertEqual(config.provider, core.PROVIDER_GEMINI)
         self.assertEqual(config.antigravity_auth_dir, "/tmp/auths")
 
     def test_config_provider_override_wins_for_login(self):
@@ -346,21 +347,8 @@ class AntigravityTests(unittest.TestCase):
         with self.assertRaises(core.ConfigError):
             core.validate_antigravity_callback(callback, "state-token")
 
-    def test_load_antigravity_auth_finds_cli_proxy_file(self):
+    def test_load_antigravity_auth_requires_explicit_auth_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            auth_file = Path(tmpdir) / "antigravity-user@example.test.json"
-            auth_file.write_text(
-                json_text(
-                    {
-                        "type": "antigravity",
-                        "access_token": "token",
-                        "refresh_token": "refresh",
-                        "expired": "2999-01-01T00:00:00Z",
-                        "project_id": "project",
-                    }
-                ),
-                encoding="utf-8",
-            )
             config = core.Config(
                 api_key="",
                 base_url=core.DEFAULT_BASE_URL,
@@ -371,10 +359,8 @@ class AntigravityTests(unittest.TestCase):
                 antigravity_auth_dir=tmpdir,
             )
 
-            metadata, path = core.load_antigravity_auth(config)
-
-        self.assertEqual(path, auth_file)
-        self.assertEqual(metadata["access_token"], "token")
+            with self.assertRaises(core.ConfigError):
+                core.load_antigravity_auth(config)
 
     def test_refresh_antigravity_auth_updates_token(self):
         config = core.Config(
