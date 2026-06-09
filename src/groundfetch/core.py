@@ -104,9 +104,24 @@ class AntigravityLoginResult:
 
 
 @dataclass(frozen=True)
+class AntigravityLoginRequest:
+    state: str
+    redirect_uri: str
+    auth_url: str
+
+
+@dataclass(frozen=True)
 class AntigravityOAuthCredentials:
     client_id: str
     client_secret: str
+
+
+@dataclass(frozen=True)
+class OAuthCallback:
+    code: str
+    state: str
+    error: str = ""
+    error_description: str = ""
 
 
 AUTH_API_KEY = "api_key"
@@ -584,6 +599,80 @@ def build_antigravity_auth_url(config: Config, state: str, redirect_uri: str) ->
     return f"{ANTIGRAVITY_AUTH_ENDPOINT}?{params}"
 
 
+def create_antigravity_login_request(config: Config, callback_port: int) -> AntigravityLoginRequest:
+    antigravity_oauth_credentials(config)
+    if callback_port <= 0:
+        raise ConfigError("manual Antigravity OAuth callback port must be greater than 0")
+    state = secrets.token_urlsafe(24)
+    redirect_uri = f"http://localhost:{callback_port}/oauth-callback"
+    auth_url = build_antigravity_auth_url(config, state, redirect_uri)
+    return AntigravityLoginRequest(state=state, redirect_uri=redirect_uri, auth_url=auth_url)
+
+
+def parse_oauth_callback(callback_url: str) -> OAuthCallback:
+    candidate = callback_url.strip()
+    if not candidate:
+        raise ConfigError("Antigravity OAuth callback URL is required")
+    if "://" not in candidate:
+        if candidate.startswith("?"):
+            candidate = "http://localhost" + candidate
+        elif any(part in candidate for part in ("/", "?", "#")) or ":" in candidate:
+            candidate = "http://" + candidate
+        elif "=" in candidate:
+            candidate = "http://localhost/?" + candidate
+        else:
+            raise ConfigError("invalid Antigravity OAuth callback URL")
+
+    parsed = urllib.parse.urlparse(candidate)
+    params = urllib.parse.parse_qs(parsed.query)
+
+    def first(name: str) -> str:
+        return normalize(params.get(name, [""])[0])
+
+    code = first("code")
+    state = first("state")
+    error = first("error")
+    error_description = first("error_description")
+
+    if parsed.fragment:
+        fragment_params = urllib.parse.parse_qs(parsed.fragment)
+
+        def first_fragment(name: str) -> str:
+            return normalize(fragment_params.get(name, [""])[0])
+
+        code = code or first_fragment("code")
+        state = state or first_fragment("state")
+        error = error or first_fragment("error")
+        error_description = error_description or first_fragment("error_description")
+
+    if code and not state and "#" in code:
+        code, state = code.split("#", 1)
+        code = normalize(code)
+        state = normalize(state)
+    if not error and error_description:
+        error = error_description
+        error_description = ""
+    if not code and not error:
+        raise ConfigError("Antigravity OAuth callback URL has no code")
+    return OAuthCallback(
+        code=code,
+        state=state,
+        error=error,
+        error_description=error_description,
+    )
+
+
+def validate_antigravity_callback(callback: OAuthCallback, expected_state: str) -> str:
+    if callback.error:
+        detail = callback.error_description or callback.error
+        raise ConfigError(f"Antigravity OAuth login failed: {detail}")
+    if callback.state != expected_state:
+        raise ConfigError("Antigravity OAuth login failed: state mismatch")
+    if not callback.code:
+        raise ConfigError("Antigravity OAuth login failed: missing authorization code")
+    return callback.code
+
+
 class AntigravityCallbackHandler(http.server.BaseHTTPRequestHandler):
     result_queue: queue.Queue[dict[str, str]]
 
@@ -626,12 +715,10 @@ def wait_for_antigravity_callback(config: Config, port: int, timeout: int) -> tu
     actual_port = int(server.server_address[1])
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    return_state = secrets.token_urlsafe(24)
-    redirect_uri = f"http://localhost:{actual_port}/oauth-callback"
-    auth_url = build_antigravity_auth_url(config, return_state, redirect_uri)
-    print(f"Open this URL to authenticate Antigravity:\n{auth_url}", file=sys.stderr)
+    login_request = create_antigravity_login_request(config, actual_port)
+    print(f"Open this URL to authenticate Antigravity:\n{login_request.auth_url}", file=sys.stderr)
     try:
-        webbrowser.open(auth_url)
+        webbrowser.open(login_request.auth_url)
     except Exception:
         pass
     try:
@@ -642,14 +729,33 @@ def wait_for_antigravity_callback(config: Config, port: int, timeout: int) -> tu
         server.shutdown()
         server.server_close()
 
-    if result.get("error"):
-        raise ConfigError(f"Antigravity OAuth login failed: {result['error']}")
-    if result.get("state") != return_state:
-        raise ConfigError("Antigravity OAuth login failed: state mismatch")
-    code = result.get("code", "")
-    if not code:
-        raise ConfigError("Antigravity OAuth login failed: missing authorization code")
-    return code, redirect_uri
+    callback = OAuthCallback(
+        code=result.get("code", ""),
+        state=result.get("state", ""),
+        error=result.get("error", ""),
+    )
+    code = validate_antigravity_callback(callback, login_request.state)
+    return code, login_request.redirect_uri
+
+
+def wait_for_manual_antigravity_callback(
+    config: Config,
+    port: int,
+    *,
+    callback_url: str = "",
+    input_stream: Any = None,
+    output_stream: Any = None,
+) -> tuple[str, str]:
+    login_request = create_antigravity_login_request(config, port)
+    output = output_stream or sys.stderr
+    print(f"Open this URL to authenticate Antigravity:\n{login_request.auth_url}", file=output)
+    if not callback_url:
+        print("Paste the final localhost callback URL:", file=output)
+        stream = input_stream or sys.stdin
+        callback_url = stream.readline()
+    callback = parse_oauth_callback(callback_url)
+    code = validate_antigravity_callback(callback, login_request.state)
+    return code, login_request.redirect_uri
 
 
 def exchange_antigravity_code(config: Config, code: str, redirect_uri: str) -> dict[str, Any]:
@@ -720,8 +826,21 @@ def credential_file_name(email: str) -> str:
     return f"antigravity-{email}.json" if email else "antigravity.json"
 
 
-def login_antigravity(config: Config, *, callback_port: int = DEFAULT_ANTIGRAVITY_CALLBACK_PORT) -> AntigravityLoginResult:
-    code, redirect_uri = wait_for_antigravity_callback(config, callback_port, config.timeout * 10)
+def login_antigravity(
+    config: Config,
+    *,
+    callback_port: int = DEFAULT_ANTIGRAVITY_CALLBACK_PORT,
+    manual_callback: bool = False,
+    callback_url: str = "",
+) -> AntigravityLoginResult:
+    if manual_callback or callback_url:
+        code, redirect_uri = wait_for_manual_antigravity_callback(
+            config,
+            callback_port,
+            callback_url=callback_url,
+        )
+    else:
+        code, redirect_uri = wait_for_antigravity_callback(config, callback_port, config.timeout * 10)
     token_payload = exchange_antigravity_code(config, code, redirect_uri)
     access_token = normalize(token_payload.get("access_token"))
     email = fetch_antigravity_email(config, access_token)

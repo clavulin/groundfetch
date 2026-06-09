@@ -84,6 +84,21 @@ export GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET='your-google-oauth-client-secret'
 groundfetch --login-antigravity
 ```
 
+For remote shells or browser sessions where localhost cannot call back into the
+script, use manual callback mode. GroundFetch prints the OAuth URL, you open it
+in any browser, then paste the final `http://localhost:.../oauth-callback?...`
+URL back into the script:
+
+```bash
+groundfetch --login-antigravity --antigravity-manual-callback
+```
+
+For non-interactive use, pass the final callback URL directly:
+
+```bash
+groundfetch --login-antigravity --antigravity-callback-url 'http://localhost:51121/oauth-callback?code=...&state=...'
+```
+
 Or create an Antigravity auth file with CLIProxyAPI. Then configure GroundFetch:
 
 ```dotenv

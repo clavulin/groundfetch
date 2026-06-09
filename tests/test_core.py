@@ -306,6 +306,46 @@ class AntigravityTests(unittest.TestCase):
                 "http://localhost:51121/oauth-callback",
             )
 
+    def test_wait_for_manual_antigravity_callback_parses_pasted_localhost_url(self):
+        config = core.Config(
+            api_key="",
+            base_url=core.DEFAULT_BASE_URL,
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            provider=core.PROVIDER_ANTIGRAVITY,
+            antigravity_client_id="client-id",
+            antigravity_client_secret="client-secret",
+        )
+        output = StringIO()
+
+        with mock.patch.object(core.secrets, "token_urlsafe", return_value="state-token"):
+            code, redirect_uri = core.wait_for_manual_antigravity_callback(
+                config,
+                51121,
+                callback_url="http://localhost:51121/oauth-callback?code=auth-code&state=state-token",
+                output_stream=output,
+            )
+
+        self.assertEqual(code, "auth-code")
+        self.assertEqual(redirect_uri, "http://localhost:51121/oauth-callback")
+        self.assertIn("Open this URL", output.getvalue())
+        self.assertIn("state=state-token", output.getvalue())
+
+    def test_parse_oauth_callback_accepts_query_string_only(self):
+        callback = core.parse_oauth_callback("code=auth-code&state=state-token")
+
+        self.assertEqual(callback.code, "auth-code")
+        self.assertEqual(callback.state, "state-token")
+
+    def test_parse_oauth_callback_rejects_state_mismatch(self):
+        callback = core.parse_oauth_callback(
+            "http://localhost:51121/oauth-callback?code=auth-code&state=wrong"
+        )
+
+        with self.assertRaises(core.ConfigError):
+            core.validate_antigravity_callback(callback, "state-token")
+
     def test_load_antigravity_auth_finds_cli_proxy_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             auth_file = Path(tmpdir) / "antigravity-user@example.test.json"
@@ -604,6 +644,54 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(saved["email"], "user@example.test")
         self.assertEqual(saved["project_id"], "project")
 
+    def test_login_antigravity_manual_callback_uses_pasted_url_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_ANTIGRAVITY,
+                antigravity_auth_dir=tmpdir,
+                antigravity_client_id="client-id",
+                antigravity_client_secret="client-secret",
+            )
+
+            with (
+                mock.patch.object(
+                    core,
+                    "wait_for_manual_antigravity_callback",
+                    return_value=("code", "http://localhost:51121/oauth-callback"),
+                ) as manual_wait,
+                mock.patch.object(core, "wait_for_antigravity_callback") as server_wait,
+                mock.patch.object(
+                    core,
+                    "exchange_antigravity_code",
+                    return_value={
+                        "access_token": "token",
+                        "refresh_token": "refresh",
+                        "expires_in": 3600,
+                    },
+                ),
+                mock.patch.object(core, "fetch_antigravity_email", return_value="user@example.test"),
+                mock.patch.object(core, "antigravity_project_id", return_value="project"),
+            ):
+                result = core.login_antigravity(
+                    config,
+                    callback_port=51121,
+                    manual_callback=True,
+                    callback_url="http://localhost:51121/oauth-callback?code=code&state=state",
+                )
+
+        manual_wait.assert_called_once_with(
+            config,
+            51121,
+            callback_url="http://localhost:51121/oauth-callback?code=code&state=state",
+        )
+        server_wait.assert_not_called()
+        self.assertEqual(result.email, "user@example.test")
+
 
 class CliTests(unittest.TestCase):
     def test_cli_login_antigravity_prints_result_json(self):
@@ -625,12 +713,49 @@ class CliTests(unittest.TestCase):
         payload = json.loads(stdout.getvalue())
         self.assertEqual(status, 0)
         from_env.assert_called_once_with(provider_override="antigravity")
-        login.assert_called_once_with(from_env.return_value, callback_port=0)
+        login.assert_called_once_with(
+            from_env.return_value,
+            callback_port=0,
+            manual_callback=False,
+            callback_url="",
+        )
         self.assertEqual(payload["success"], True)
         self.assertEqual(payload["provider"], "antigravity")
         self.assertEqual(payload["authFile"], "/tmp/antigravity-user@example.test.json")
         self.assertEqual(payload["email"], "user@example.test")
         self.assertEqual(payload["projectId"], "project")
+
+    def test_cli_login_antigravity_passes_manual_callback_args(self):
+        result = core.AntigravityLoginResult(
+            auth_file=Path("/tmp/antigravity-user@example.test.json"),
+            email="user@example.test",
+            project_id="project",
+        )
+        stdout = StringIO()
+        callback_url = "http://localhost:51121/oauth-callback?code=code&state=state"
+
+        with (
+            mock.patch.object(cli, "load_default_env"),
+            mock.patch.object(cli.Config, "from_env") as from_env,
+            mock.patch.object(cli, "login_antigravity", return_value=result) as login,
+            redirect_stdout(stdout),
+        ):
+            status = cli.main(
+                [
+                    "--login-antigravity",
+                    "--antigravity-manual-callback",
+                    "--antigravity-callback-url",
+                    callback_url,
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        login.assert_called_once_with(
+            from_env.return_value,
+            callback_port=51121,
+            manual_callback=True,
+            callback_url=callback_url,
+        )
 
 
 class ParseTests(unittest.TestCase):

@@ -24,6 +24,16 @@ def main(argv: list[str] | None = None) -> int:
         default=51121,
         help="Local OAuth callback port for --login-antigravity",
     )
+    parser.add_argument(
+        "--antigravity-manual-callback",
+        action="store_true",
+        help="Print the Antigravity OAuth URL and read the final localhost callback URL from stdin",
+    )
+    parser.add_argument(
+        "--antigravity-callback-url",
+        default="",
+        help="Complete Antigravity localhost callback URL to exchange without running a local server",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -32,6 +42,8 @@ def main(argv: list[str] | None = None) -> int:
             result = login_antigravity(
                 config,
                 callback_port=args.antigravity_callback_port,
+                manual_callback=args.antigravity_manual_callback,
+                callback_url=args.antigravity_callback_url,
             )
             print(
                 json.dumps(
