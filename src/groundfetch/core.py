@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +18,7 @@ DEFAULT_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_TIMEOUT = 30
 DEFAULT_USER_AGENT = "groundfetch/0.1"
+DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT = 10
 
 MAX_LIMIT = 20
 DESCRIPTION_MAX_LEN = 500
@@ -52,6 +55,11 @@ class SearchResponse(TypedDict):
     data: dict[str, list[WebResult]]
 
 
+AUTH_API_KEY = "api_key"
+AUTH_OAUTH = "oauth"
+AUTH_MODES = {AUTH_API_KEY, AUTH_OAUTH}
+
+
 @dataclass(frozen=True)
 class Config:
     api_key: str
@@ -59,18 +67,63 @@ class Config:
     model: str
     timeout: int
     user_agent: str
+    auth_mode: str = AUTH_API_KEY
+    oauth_token: str = ""
+    oauth_token_command: str = ""
+    oauth_project: str = ""
+    oauth_token_command_timeout: int = DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT
 
     @classmethod
     def from_env(cls) -> "Config":
         api_key = os.environ.get("GROUNDFETCH_API_KEY", "").strip()
-        if not api_key:
-            raise ConfigError(f"GROUNDFETCH_API_KEY is not set (looked in env and {ENV_FILE})")
+        oauth_token = os.environ.get("GROUNDFETCH_OAUTH_TOKEN", "").strip()
+        oauth_token_command = os.environ.get("GROUNDFETCH_OAUTH_TOKEN_COMMAND", "").strip()
+        oauth_project = os.environ.get("GROUNDFETCH_OAUTH_PROJECT", "").strip()
+
+        auth_mode = (
+            os.environ.get("GROUNDFETCH_AUTH", "").strip().lower().replace("-", "_")
+        )
+        if auth_mode and auth_mode not in AUTH_MODES:
+            raise ConfigError(
+                "GROUNDFETCH_AUTH must be one of "
+                f"{', '.join(sorted(AUTH_MODES))}, got {auth_mode!r}"
+            )
+        if not auth_mode:
+            auth_mode = AUTH_OAUTH if oauth_token or oauth_token_command else AUTH_API_KEY
 
         raw_timeout = os.environ.get("GROUNDFETCH_TIMEOUT", "").strip()
         try:
             timeout = int(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT
         except ValueError as exc:
             raise ConfigError(f"GROUNDFETCH_TIMEOUT must be an integer, got {raw_timeout!r}") from exc
+
+        raw_oauth_token_command_timeout = (
+            os.environ.get("GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT", "").strip()
+        )
+        try:
+            oauth_token_command_timeout = (
+                int(raw_oauth_token_command_timeout)
+                if raw_oauth_token_command_timeout
+                else DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT
+            )
+        except ValueError as exc:
+            raise ConfigError(
+                "GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT must be an integer, "
+                f"got {raw_oauth_token_command_timeout!r}"
+            ) from exc
+
+        if auth_mode == AUTH_API_KEY and not api_key:
+            raise ConfigError(
+                "GROUNDFETCH_API_KEY is not set "
+                f"(looked in env and {ENV_FILE}); set GROUNDFETCH_AUTH=oauth "
+                "with GROUNDFETCH_OAUTH_TOKEN or GROUNDFETCH_OAUTH_TOKEN_COMMAND "
+                "to use OAuth"
+            )
+        if auth_mode == AUTH_OAUTH and not (oauth_token or oauth_token_command):
+            raise ConfigError(
+                "OAuth auth requires GROUNDFETCH_OAUTH_TOKEN or "
+                "GROUNDFETCH_OAUTH_TOKEN_COMMAND"
+            )
 
         base_url = (
             os.environ.get("GROUNDFETCH_BASE_URL", "").strip().rstrip("/") or DEFAULT_BASE_URL
@@ -83,6 +136,11 @@ class Config:
             model=model,
             timeout=timeout,
             user_agent=user_agent,
+            auth_mode=auth_mode,
+            oauth_token=oauth_token,
+            oauth_token_command=oauth_token_command,
+            oauth_project=oauth_project,
+            oauth_token_command_timeout=oauth_token_command_timeout,
         )
 
     @property
@@ -153,6 +211,65 @@ def resolve_redirect(url: str, user_agent: str) -> str:
     return url
 
 
+def oauth_authorization_header(config: Config) -> str:
+    token = config.oauth_token
+    if not token and config.oauth_token_command:
+        try:
+            args = shlex.split(config.oauth_token_command)
+        except ValueError as exc:
+            raise ConfigError(
+                f"GROUNDFETCH_OAUTH_TOKEN_COMMAND is invalid: {exc}"
+            ) from exc
+        if not args:
+            raise ConfigError("GROUNDFETCH_OAUTH_TOKEN_COMMAND is empty")
+        try:
+            result = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=config.oauth_token_command_timeout,
+            )
+        except FileNotFoundError as exc:
+            raise ConfigError(
+                "GROUNDFETCH_OAUTH_TOKEN_COMMAND executable was not found: "
+                f"{args[0]!r}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise ConfigError(
+                "GROUNDFETCH_OAUTH_TOKEN_COMMAND timed out after "
+                f"{config.oauth_token_command_timeout}s"
+            ) from exc
+
+        if result.returncode != 0:
+            detail = result.stderr.strip() or "no stderr"
+            raise ConfigError(
+                "GROUNDFETCH_OAUTH_TOKEN_COMMAND failed with exit "
+                f"{result.returncode}: {detail[:500]}"
+            )
+        token = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+
+    if not token:
+        raise ConfigError("OAuth token command returned no token")
+
+    return token if token.lower().startswith("bearer ") else f"Bearer {token}"
+
+
+def build_headers(config: Config) -> dict[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": config.user_agent,
+    }
+    if config.auth_mode == AUTH_OAUTH:
+        headers["Authorization"] = oauth_authorization_header(config)
+        if config.oauth_project:
+            headers["x-goog-user-project"] = config.oauth_project
+    else:
+        headers["x-goog-api-key"] = config.api_key
+    return headers
+
+
 def post_generate_content(config: Config, query: str) -> dict[str, Any]:
     body = {
         "contents": [{"parts": [{"text": query}]}],
@@ -161,12 +278,7 @@ def post_generate_content(config: Config, query: str) -> dict[str, Any]:
     request = urllib.request.Request(
         config.endpoint,
         data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": config.user_agent,
-            "x-goog-api-key": config.api_key,
-        },
+        headers=build_headers(config),
         method="POST",
     )
     try:

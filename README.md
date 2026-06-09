@@ -32,12 +32,40 @@ GROUNDFETCH_API_KEY=...
 GROUNDFETCH_MODEL=gemini-3.1-flash-lite
 ```
 
+API key auth is the default. To use an OAuth access token instead:
+
+```dotenv
+GROUNDFETCH_AUTH=oauth
+GROUNDFETCH_OAUTH_TOKEN=ya29...
+GROUNDFETCH_OAUTH_PROJECT=my-google-cloud-project
+```
+
+Or point GroundFetch at a credential helper that prints an access token to
+stdout:
+
+```dotenv
+GROUNDFETCH_AUTH=oauth
+GROUNDFETCH_OAUTH_TOKEN_COMMAND="gcloud auth application-default print-access-token"
+GROUNDFETCH_OAUTH_PROJECT=my-google-cloud-project
+```
+
+`GROUNDFETCH_OAUTH_PROJECT` is sent as `x-goog-user-project` when set, which is
+commonly required for Gemini API OAuth quota/billing. GroundFetch intentionally
+does not scrape private keyrings. If Antigravity or another OAuth login tool
+exposes a supported token-printing helper, set `GROUNDFETCH_OAUTH_TOKEN_COMMAND`
+to that command.
+
+When `GROUNDFETCH_AUTH` is omitted, OAuth is selected automatically if
+`GROUNDFETCH_OAUTH_TOKEN` or `GROUNDFETCH_OAUTH_TOKEN_COMMAND` is set; otherwise
+API key auth is used.
+
 Optional settings:
 
 ```dotenv
 GROUNDFETCH_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GROUNDFETCH_TIMEOUT=30
 GROUNDFETCH_USER_AGENT=groundfetch/0.1
+GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT=10
 ```
 
 Local project `.env` files are also loaded after the user-level config, without
