@@ -21,6 +21,29 @@ Or run directly from the checkout:
 python3 -m groundfetch --query "OpenAI models official docs" --limit 5
 ```
 
+If you are asking Codex to install from just the repository URL, paste this:
+
+```text
+Install GroundFetch from https://github.com/clavulin/groundfetch for this user.
+Clone the repo if needed, install it with Python, symlink `skills/groundfetch`
+into `~/.codex/skills/groundfetch`, and verify `groundfetch --help` works.
+Do not invent credentials; if configuration is missing, report the exact
+`GROUNDFETCH_*` variables needed from README.md.
+```
+
+If you are asking Claude Code to install from just the repository URL, paste
+this:
+
+```text
+Install GroundFetch from https://github.com/clavulin/groundfetch for this user.
+Clone the repo if needed and install it with Python. Copy `skills/groundfetch`
+into `~/.claude/skills/groundfetch` (copy, do not symlink), then delete the
+Codex-only `agents/openai.yaml` from that copy so only the Claude-relevant skill
+files are installed. Verify `groundfetch --help` works. Do not invent
+credentials; if configuration is missing, report the exact `GROUNDFETCH_*`
+variables needed from README.md.
+```
+
 ## Configure
 
 GroundFetch only reads `GROUNDFETCH_*` settings.
