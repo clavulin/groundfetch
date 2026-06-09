@@ -62,11 +62,57 @@ API key auth is used.
 Optional settings:
 
 ```dotenv
+GROUNDFETCH_PROVIDER=gemini
 GROUNDFETCH_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GROUNDFETCH_TIMEOUT=30
 GROUNDFETCH_USER_AGENT=groundfetch/0.1
 GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT=10
 ```
+
+### Antigravity auth
+
+GroundFetch can also use Antigravity OAuth auth JSON files compatible with
+CLIProxyAPI.
+This sends requests to Antigravity's Cloud Code PA `v1internal:generateContent`
+endpoint instead of the standard Gemini API.
+
+Create an auth file directly:
+
+```bash
+export GROUNDFETCH_ANTIGRAVITY_CLIENT_ID='your-google-oauth-client-id'
+export GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET='your-google-oauth-client-secret'
+groundfetch --login-antigravity
+```
+
+Or create an Antigravity auth file with CLIProxyAPI. Then configure GroundFetch:
+
+```dotenv
+GROUNDFETCH_PROVIDER=antigravity
+GROUNDFETCH_ANTIGRAVITY_AUTH_FILE=~/.cli-proxy-api/antigravity-you@example.com.json
+GROUNDFETCH_MODEL=gemini-3-pro
+```
+
+If `GROUNDFETCH_ANTIGRAVITY_AUTH_FILE` is omitted, GroundFetch scans
+`~/.cli-proxy-api` for `antigravity*.json`. To use another directory:
+
+```dotenv
+GROUNDFETCH_ANTIGRAVITY_AUTH_DIR=/path/to/auths
+```
+
+Optional Antigravity settings:
+
+```dotenv
+GROUNDFETCH_ANTIGRAVITY_BASE_URL=https://daily-cloudcode-pa.googleapis.com,https://cloudcode-pa.googleapis.com
+GROUNDFETCH_ANTIGRAVITY_USER_AGENT=antigravity/1.21.9 darwin/arm64
+GROUNDFETCH_ANTIGRAVITY_CLIENT_ID=your-google-oauth-client-id
+GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET=your-google-oauth-client-secret
+```
+
+GroundFetch uses existing Antigravity access tokens without OAuth client
+settings. The client id and secret are required only for `--login-antigravity`
+and for refreshing expired Antigravity access tokens with the stored
+`refresh_token`. It discovers `project_id` via `loadCodeAssist` when missing
+and falls back to `onboardUser` for first-use accounts.
 
 Local project `.env` files are also loaded after the user-level config, without
 overriding live environment variables.
