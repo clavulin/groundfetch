@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -131,6 +131,15 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.provider, core.PROVIDER_GEMINI)
         self.assertEqual(config.providers, (core.PROVIDER_GEMINI, core.PROVIDER_GROK))
+
+    def test_config_rejects_http_grok_base_url(self):
+        env = {
+            "GROUNDFETCH_PROVIDER": "grok",
+            "GROUNDFETCH_GROK_BASE_URL": "http://cli-chat-proxy.test/v1",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(core.ConfigError, "https URL"):
+                core.Config.from_env()
 
     def test_config_does_not_auto_select_antigravity_for_explicit_auth_dir(self):
         env = {
@@ -282,6 +291,87 @@ class AuthHeaderTests(unittest.TestCase):
             text=True,
             timeout=2,
         )
+
+
+class ProviderTimeoutTests(unittest.TestCase):
+    def test_post_generate_content_wraps_timeout(self):
+        config = core.Config(
+            api_key="key",
+            base_url="https://example.test/v1beta",
+            model="model",
+            timeout=1,
+            user_agent="agent",
+        )
+
+        with mock.patch.object(core.urllib.request, "urlopen", side_effect=TimeoutError("slow")):
+            with self.assertRaisesRegex(core.UpstreamError, "timed out after 1s"):
+                core.post_generate_content(config, "hello")
+
+    def test_post_antigravity_generate_content_wraps_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "antigravity-user@example.test.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "type": "antigravity",
+                        "access_token": "token",
+                        "expired": "2999-01-01T00:00:00Z",
+                        "project_id": "project",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_ANTIGRAVITY,
+                antigravity_auth_file=str(auth_file),
+                antigravity_base_urls=("https://daily.test",),
+            )
+
+            with mock.patch.object(
+                core.urllib.request,
+                "urlopen",
+                side_effect=TimeoutError("slow"),
+            ):
+                with self.assertRaisesRegex(core.UpstreamError, "timed out after 1s"):
+                    core.post_antigravity_generate_content(config, "hello")
+
+    def test_post_grok_responses_wraps_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::active": {
+                            "key": "token",
+                            "expires_at": "2999-01-01T00:00:00Z",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+                grok_base_url="https://cli-chat-proxy.test/v1",
+            )
+
+            with mock.patch.object(
+                core.urllib.request,
+                "urlopen",
+                side_effect=TimeoutError("slow"),
+            ):
+                with self.assertRaisesRegex(core.UpstreamError, "timed out after 1s"):
+                    core.post_grok_responses(config, "hello")
 
 
 class AntigravityTests(unittest.TestCase):
@@ -744,6 +834,102 @@ class GrokTests(unittest.TestCase):
 
         self.assertEqual(metadata["key"], "active-token")
 
+    def test_load_grok_auth_picks_latest_parseable_active_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::first": {
+                            "key": "first-token",
+                            "expires_at": "2999-01-01T00:00:00Z",
+                        },
+                        "https://auth.x.ai::second": {
+                            "key": "second-token",
+                            "expires_at": "2999-01-02T00:00:00Z",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+            )
+
+            metadata = core.load_grok_auth(config)
+
+        self.assertEqual(metadata["key"], "second-token")
+
+    def test_load_grok_auth_unparseable_expiry_does_not_outrank_future_expiry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::zzz-unparseable": {
+                            "key": "unparseable-token",
+                            "expires_at": "not-a-date",
+                        },
+                        "https://auth.x.ai::aaa-future": {
+                            "key": "future-token",
+                            "expires_at": "2999-01-01T00:00:00Z",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+            )
+
+            metadata = core.load_grok_auth(config)
+
+        self.assertEqual(metadata["key"], "future-token")
+
+    def test_load_grok_auth_handles_numeric_epoch_expiry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::expired": {
+                            "key": "expired-token",
+                            "expires_at": 946684800,
+                        },
+                        "https://auth.x.ai::future": {
+                            "key": "future-token",
+                            "expires_at": 32503680000,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+            )
+
+            metadata = core.load_grok_auth(config)
+
+        self.assertEqual(metadata["key"], "future-token")
+
     def test_load_grok_auth_expiry_error_tells_user_to_relogin(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             auth_file = Path(tmpdir) / "auth.json"
@@ -770,6 +956,20 @@ class GrokTests(unittest.TestCase):
 
             with self.assertRaisesRegex(core.ConfigError, "grok login"):
                 core.load_grok_auth(config)
+
+    def test_post_grok_responses_rejects_non_https_base_url(self):
+        config = core.Config(
+            api_key="",
+            base_url=core.DEFAULT_BASE_URL,
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            provider=core.PROVIDER_GROK,
+            grok_base_url="http://cli-chat-proxy.test/v1",
+        )
+
+        with self.assertRaisesRegex(core.ConfigError, "https URL"):
+            core.post_grok_responses(config, "hello")
 
     def test_post_grok_responses_uses_cli_proxy_auth_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -871,6 +1071,50 @@ class GrokTests(unittest.TestCase):
         self.assertEqual(web[0]["title"], "One")
         self.assertEqual(web[0]["description"], "summary")
         self.assertEqual(web[0]["provider"], "grok")
+
+    def test_parse_grok_response_applies_limit(self):
+        payload = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "summary",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://one.test",
+                                    "title": "One",
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://two.test",
+                                    "title": "Two",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        result = core.parse_grok_response(payload, limit=1)
+
+        self.assertEqual([item["url"] for item in result["data"]["web"]], ["https://one.test"])
+
+    def test_parse_grok_response_raises_on_error_field(self):
+        payload = {"error": {"message": "bad request"}}
+
+        with self.assertRaisesRegex(core.UpstreamError, "bad request"):
+            core.parse_grok_response(payload, limit=5)
+
+    def test_parse_grok_response_tolerates_malformed_or_empty_output(self):
+        malformed = core.parse_grok_response({"output": {"not": "a list"}}, limit=5)
+        empty = core.parse_grok_response({"output": []}, limit=5)
+
+        self.assertEqual(malformed["data"]["web"], [])
+        self.assertEqual(empty["data"]["web"], [])
 
 
 class CliTests(unittest.TestCase):
@@ -1098,6 +1342,7 @@ class ParseTests(unittest.TestCase):
         with (
             mock.patch.object(core, "post_generate_content") as gemini_post,
             mock.patch.object(core, "post_grok_responses", return_value=grok_payload),
+            redirect_stderr(StringIO()),
         ):
             result = core.search("hello", limit=5, config=config)
 
@@ -1105,6 +1350,75 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(result["providersUsed"], ["grok"])
         self.assertEqual(result["data"]["web"][0]["url"], "https://two.test")
         self.assertEqual(result["data"]["web"][0]["provider"], "grok")
+
+    def test_search_aggregation_records_unexpected_worker_exception(self):
+        config = core.Config(
+            api_key="key",
+            base_url="https://example.test/v1beta",
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            providers=(core.PROVIDER_GEMINI, core.PROVIDER_GROK),
+        )
+        grok_result = {
+            "success": True,
+            "provider": "groundfetch",
+            "providersUsed": [core.PROVIDER_GROK],
+            "data": {
+                "web": [
+                    {
+                        "title": "Two",
+                        "url": "https://two.test",
+                        "description": "",
+                        "position": 1,
+                        "provider": core.PROVIDER_GROK,
+                    }
+                ]
+            },
+        }
+
+        def fake_search_with_provider(config, query, limit, provider):
+            if provider == core.PROVIDER_GEMINI:
+                raise TimeoutError("slow")
+            return grok_result
+
+        stderr = StringIO()
+        with (
+            mock.patch.object(
+                core,
+                "search_with_provider",
+                side_effect=fake_search_with_provider,
+            ),
+            redirect_stderr(stderr),
+        ):
+            result = core.search("hello", limit=5, config=config)
+
+        self.assertEqual(result["providersUsed"], ["grok"])
+        self.assertIn("provider gemini failed", stderr.getvalue())
+        self.assertIn("gemini failed: slow", stderr.getvalue())
+
+    def test_search_aggregation_all_providers_fail_raises_first_provider_error(self):
+        config = core.Config(
+            api_key="key",
+            base_url="https://example.test/v1beta",
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            providers=(core.PROVIDER_GROK, core.PROVIDER_GEMINI),
+        )
+
+        def fake_search_with_provider(config, query, limit, provider):
+            if provider == core.PROVIDER_GROK:
+                raise TimeoutError("slow")
+            raise core.ConfigError("gemini missing")
+
+        with mock.patch.object(
+            core,
+            "search_with_provider",
+            side_effect=fake_search_with_provider,
+        ):
+            with self.assertRaisesRegex(core.UpstreamError, "grok failed: slow"):
+                core.search("hello", limit=5, config=config)
 
 
 if __name__ == "__main__":

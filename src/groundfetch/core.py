@@ -223,6 +223,10 @@ class Config:
             else:
                 provider = PROVIDER_GEMINI
             providers = (provider,)
+        if PROVIDER_GROK in providers:
+            parsed_grok_base_url = urllib.parse.urlparse(grok_base_url)
+            if parsed_grok_base_url.scheme != "https" or not parsed_grok_base_url.netloc:
+                raise ConfigError("GROUNDFETCH_GROK_BASE_URL must be an https URL")
 
         auth_mode = (
             os.environ.get("GROUNDFETCH_AUTH", "").strip().lower().replace("-", "_")
@@ -491,6 +495,10 @@ def post_generate_content(config: Config, query: str) -> dict[str, Any]:
         raise UpstreamError(f"HTTP {exc.code} from {config.base_url}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise UpstreamError(f"connection to {config.base_url} failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise UpstreamError(
+            f"{config.endpoint} timed out after {config.timeout}s"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise UpstreamError("upstream returned invalid JSON") from exc
 
@@ -541,6 +549,28 @@ def parse_rfc3339(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def parse_grok_expires_at(value: Any) -> datetime | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        epoch = float(value)
+    elif isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            epoch = float(stripped)
+        except ValueError:
+            return parse_rfc3339(stripped)
+    else:
+        return None
+
+    if epoch > 1_000_000_000_000:
+        epoch = epoch / 1000
+    try:
+        return datetime.fromtimestamp(epoch, timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def antigravity_token_expired(metadata: dict[str, Any]) -> bool:
@@ -1139,6 +1169,8 @@ def post_antigravity_generate_content(config: Config, query: str) -> dict[str, A
                 break
         except urllib.error.URLError as exc:
             last_error = UpstreamError(f"connection to {endpoint} failed: {exc.reason}")
+        except TimeoutError as exc:
+            last_error = UpstreamError(f"{endpoint} timed out after {config.timeout}s")
         except json.JSONDecodeError as exc:
             raise UpstreamError("Antigravity returned invalid JSON") from exc
 
@@ -1155,7 +1187,7 @@ def unwrap_antigravity_response(payload: dict[str, Any]) -> dict[str, Any]:
 def load_grok_auth(config: Config) -> dict[str, Any]:
     path = expand_path(config.grok_auth_file)
     payload = read_json_file(path)
-    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    candidates: list[tuple[int, datetime, str, dict[str, Any]]] = []
     expired_with_token = False
     now = datetime.now(timezone.utc)
 
@@ -1164,21 +1196,29 @@ def load_grok_auth(config: Config) -> dict[str, Any]:
             continue
         if not isinstance(value, dict) or not normalize(value.get("key")):
             continue
-        expires_at = parse_rfc3339(normalize(value.get("expires_at")))
+        expires_at = parse_grok_expires_at(value.get("expires_at"))
         if expires_at is not None and expires_at <= now:
             expired_with_token = True
             continue
-        candidates.append((expires_at or datetime.max.replace(tzinfo=timezone.utc), value))
+        expiry_priority = 1 if expires_at is not None else 0
+        sort_expiry = expires_at or datetime.min.replace(tzinfo=timezone.utc)
+        candidates.append((expiry_priority, sort_expiry, key, value))
 
     if candidates:
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0][1]
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        return candidates[0][3]
 
     if expired_with_token:
         raise ConfigError(
             f"Grok auth token in {path} is expired; run `grok login` to re-authenticate"
         )
     raise ConfigError(f"Grok auth file has no active https://auth.x.ai session token: {path}")
+
+
+def validate_grok_base_url(config: Config) -> None:
+    parsed = urllib.parse.urlparse(config.grok_base_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ConfigError("GROUNDFETCH_GROK_BASE_URL must be an https URL")
 
 
 def grok_body(config: Config, query: str) -> dict[str, Any]:
@@ -1204,6 +1244,7 @@ def build_grok_headers(config: Config, token: str) -> dict[str, str]:
 
 
 def post_grok_responses(config: Config, query: str) -> dict[str, Any]:
+    validate_grok_base_url(config)
     metadata = load_grok_auth(config)
     token = normalize(metadata.get("key"))
     endpoint = config.grok_base_url.rstrip("/") + GROK_RESPONSES_PATH
@@ -1224,6 +1265,8 @@ def post_grok_responses(config: Config, query: str) -> dict[str, Any]:
         raise UpstreamError(f"HTTP {exc.code} from {endpoint}: {detail}") from exc
     except urllib.error.URLError as exc:
         raise UpstreamError(f"connection to {endpoint} failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise UpstreamError(f"{endpoint} timed out after {config.timeout}s") from exc
     except json.JSONDecodeError as exc:
         raise UpstreamError("Grok returned invalid JSON") from exc
 
@@ -1506,6 +1549,10 @@ def aggregate_search(
             with lock:
                 errors[provider] = exc
             return
+        except Exception as exc:
+            with lock:
+                errors[provider] = UpstreamError(f"{provider} failed: {exc}")
+            return
         with lock:
             responses[provider] = response
 
@@ -1516,6 +1563,12 @@ def aggregate_search(
         thread.join()
 
     if responses:
+        for provider in providers:
+            if provider in errors:
+                print(
+                    f"groundfetch warning: provider {provider} failed: {errors[provider]}",
+                    file=sys.stderr,
+                )
         return merge_provider_responses(responses, providers, limit)
 
     for provider in providers:
