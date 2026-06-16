@@ -101,6 +101,37 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.antigravity_client_id, "client-id")
         self.assertEqual(config.antigravity_client_secret, "client-secret")
 
+    def test_config_reads_grok_provider_without_api_key(self):
+        env = {
+            "GROUNDFETCH_PROVIDER": "grok",
+            "GROUNDFETCH_GROK_AUTH_FILE": "/tmp/grok-auth.json",
+            "GROUNDFETCH_GROK_BASE_URL": "https://cli-chat-proxy.test/v1/",
+            "GROUNDFETCH_GROK_MODEL": "grok-test",
+            "GROUNDFETCH_GROK_USER_AGENT": "grok-cli/test",
+            "GROUNDFETCH_GROK_CLIENT_VERSION": "0.2.test",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = core.Config.from_env()
+
+        self.assertEqual(config.provider, core.PROVIDER_GROK)
+        self.assertEqual(config.providers, (core.PROVIDER_GROK,))
+        self.assertEqual(config.grok_auth_file, "/tmp/grok-auth.json")
+        self.assertEqual(config.grok_base_url, "https://cli-chat-proxy.test/v1")
+        self.assertEqual(config.grok_model, "grok-test")
+        self.assertEqual(config.grok_user_agent, "grok-cli/test")
+        self.assertEqual(config.grok_client_version, "0.2.test")
+
+    def test_config_reads_multi_provider_list(self):
+        env = {
+            "GROUNDFETCH_PROVIDERS": "gemini, grok, gemini",
+            "GROUNDFETCH_GROK_AUTH_FILE": "/tmp/grok-auth.json",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = core.Config.from_env()
+
+        self.assertEqual(config.provider, core.PROVIDER_GEMINI)
+        self.assertEqual(config.providers, (core.PROVIDER_GEMINI, core.PROVIDER_GROK))
+
     def test_config_does_not_auto_select_antigravity_for_explicit_auth_dir(self):
         env = {
             "GROUNDFETCH_API_KEY": "key",
@@ -679,6 +710,169 @@ class AntigravityTests(unittest.TestCase):
         self.assertEqual(result.email, "user@example.test")
 
 
+class GrokTests(unittest.TestCase):
+    def test_load_grok_auth_picks_active_token(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::expired": {
+                            "key": "old-token",
+                            "expires_at": "2000-01-01T00:00:00.123456789Z",
+                        },
+                        "https://auth.x.ai::active": {
+                            "key": "active-token",
+                            "refresh_token": "refresh",
+                            "expires_at": "2999-01-01T00:00:00.123456789Z",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+            )
+
+            metadata = core.load_grok_auth(config)
+
+        self.assertEqual(metadata["key"], "active-token")
+
+    def test_load_grok_auth_expiry_error_tells_user_to_relogin(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::expired": {
+                            "key": "old-token",
+                            "expires_at": "2000-01-01T00:00:00.123456789Z",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+            )
+
+            with self.assertRaisesRegex(core.ConfigError, "grok login"):
+                core.load_grok_auth(config)
+
+    def test_post_grok_responses_uses_cli_proxy_auth_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            auth_file = Path(tmpdir) / "auth.json"
+            auth_file.write_text(
+                json_text(
+                    {
+                        "https://auth.x.ai::active": {
+                            "key": "token",
+                            "expires_at": "2999-01-01T00:00:00Z",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = core.Config(
+                api_key="",
+                base_url=core.DEFAULT_BASE_URL,
+                model="model",
+                timeout=1,
+                user_agent="agent",
+                provider=core.PROVIDER_GROK,
+                grok_auth_file=str(auth_file),
+                grok_base_url="https://cli-chat-proxy.test/v1",
+                grok_model="grok-test",
+                grok_user_agent="grok-cli/test",
+                grok_client_version="0.2.test",
+            )
+            seen = {}
+
+            def fake_urlopen(request, timeout):
+                seen["url"] = request.full_url
+                seen["headers"] = dict(request.header_items())
+                seen["body"] = json_loads(request.data)
+                seen["timeout"] = timeout
+                return FakeResponse(b'{"output":[]}')
+
+            with mock.patch.object(core.urllib.request, "urlopen", side_effect=fake_urlopen):
+                payload = core.post_grok_responses(config, "hello")
+
+        self.assertEqual(payload, {"output": []})
+        self.assertEqual(seen["url"], "https://cli-chat-proxy.test/v1/responses")
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer token")
+        self.assertEqual(seen["headers"]["X-xai-token-auth"], "xai-grok-cli")
+        self.assertEqual(seen["headers"]["X-grok-model-override"], "grok-test")
+        self.assertEqual(seen["headers"]["X-grok-client-version"], "0.2.test")
+        self.assertEqual(seen["body"]["model"], "grok-test")
+        self.assertEqual(seen["body"]["input"], "hello")
+        self.assertEqual(seen["body"]["tools"], [{"type": "web_search"}])
+        self.assertEqual(seen["body"]["stream"], False)
+        self.assertEqual(seen["timeout"], 1)
+
+    def test_parse_grok_response_uses_citations_then_search_sources(self):
+        payload = {
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {
+                        "type": "search",
+                        "sources": [
+                            {"type": "url", "url": "https://fallback.test"},
+                            {"type": "url", "url": "https://one.test"},
+                        ],
+                    },
+                },
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "summary",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://one.test",
+                                    "title": "One",
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://two.test",
+                                    "title": "Two",
+                                },
+                            ],
+                        }
+                    ],
+                },
+            ]
+        }
+
+        result = core.parse_grok_response(payload, limit=3)
+        web = result["data"]["web"]
+
+        self.assertEqual(result["providersUsed"], ["grok"])
+        self.assertEqual([item["url"] for item in web], [
+            "https://one.test",
+            "https://two.test",
+            "https://fallback.test",
+        ])
+        self.assertEqual(web[0]["title"], "One")
+        self.assertEqual(web[0]["description"], "summary")
+        self.assertEqual(web[0]["provider"], "grok")
+
+
 class CliTests(unittest.TestCase):
     def test_cli_login_antigravity_prints_result_json(self):
         result = core.AntigravityLoginResult(
@@ -743,6 +937,28 @@ class CliTests(unittest.TestCase):
             callback_url=callback_url,
         )
 
+    def test_cli_provider_override_accepts_comma_list(self):
+        stdout = StringIO()
+        result = {
+            "success": True,
+            "provider": "groundfetch",
+            "providersUsed": ["gemini", "grok"],
+            "data": {"web": []},
+        }
+
+        with (
+            mock.patch.object(cli, "load_default_env"),
+            mock.patch.object(cli.Config, "from_env") as from_env,
+            mock.patch.object(cli, "search", return_value=result) as search,
+            redirect_stdout(stdout),
+        ):
+            status = cli.main(["--query", "hello", "--provider", "gemini,grok"])
+
+        self.assertEqual(status, 0)
+        from_env.assert_called_once_with(provider_override="gemini,grok")
+        search.assert_called_once_with("hello", limit=5, config=from_env.return_value)
+        self.assertEqual(json.loads(stdout.getvalue())["providersUsed"], ["gemini", "grok"])
+
 
 class ParseTests(unittest.TestCase):
     def test_parse_response_deduplicates_and_limits_results(self):
@@ -784,6 +1000,111 @@ class ParseTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         post.assert_called_once_with(config, "hello")
+
+    def test_search_aggregates_providers_with_dedupe_and_round_robin_order(self):
+        config = core.Config(
+            api_key="key",
+            base_url="https://example.test/v1beta",
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            providers=(core.PROVIDER_GEMINI, core.PROVIDER_GROK),
+        )
+        gemini_payload = {
+            "candidates": [
+                {
+                    "content": {"parts": [{"text": "gemini summary"}]},
+                    "groundingMetadata": {
+                        "groundingChunks": [
+                            {"web": {"title": "One", "uri": "https://one.test"}},
+                            {"web": {"title": "Shared", "uri": "https://shared.test"}},
+                        ]
+                    },
+                }
+            ]
+        }
+        grok_payload = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "grok summary",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://shared.test",
+                                    "title": "Shared Grok",
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://two.test",
+                                    "title": "Two",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with (
+            mock.patch.object(core, "post_generate_content", return_value=gemini_payload),
+            mock.patch.object(core, "post_grok_responses", return_value=grok_payload),
+        ):
+            result = core.search("hello", limit=5, config=config)
+
+        web = result["data"]["web"]
+        self.assertEqual(result["providersUsed"], ["gemini", "grok"])
+        self.assertEqual([item["url"] for item in web], [
+            "https://one.test",
+            "https://shared.test",
+            "https://two.test",
+        ])
+        self.assertEqual([item["position"] for item in web], [1, 2, 3])
+        self.assertEqual([item["provider"] for item in web], ["gemini", "grok", "grok"])
+
+    def test_search_aggregation_returns_partial_success_when_one_provider_fails(self):
+        config = core.Config(
+            api_key="",
+            base_url="https://example.test/v1beta",
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            providers=(core.PROVIDER_GEMINI, core.PROVIDER_GROK),
+        )
+        grok_payload = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "grok summary",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://two.test",
+                                    "title": "Two",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+
+        with (
+            mock.patch.object(core, "post_generate_content") as gemini_post,
+            mock.patch.object(core, "post_grok_responses", return_value=grok_payload),
+        ):
+            result = core.search("hello", limit=5, config=config)
+
+        gemini_post.assert_not_called()
+        self.assertEqual(result["providersUsed"], ["grok"])
+        self.assertEqual(result["data"]["web"][0]["url"], "https://two.test")
+        self.assertEqual(result["data"]["web"][0]["provider"], "grok")
 
 
 if __name__ == "__main__":

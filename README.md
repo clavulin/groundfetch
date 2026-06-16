@@ -2,10 +2,11 @@
 
 Lightweight grounded web search for coding agents.
 
-GroundFetch calls a Gemini-compatible `generateContent` endpoint with the
-`google_search` tool enabled, then returns compact JSON results with source
-titles and URLs. It is designed for agent workflows that want source-backed web
-lookup without keeping an MCP server loaded.
+GroundFetch calls grounded search providers and returns compact JSON results
+with source titles and URLs. It supports Gemini `generateContent`,
+Antigravity's Cloud Code PA wrapper, and Grok's CLI chat proxy Responses API.
+It is designed for agent workflows that want source-backed web lookup without
+keeping an MCP server loaded.
 
 ## Install
 
@@ -86,6 +87,8 @@ Optional settings:
 
 ```dotenv
 GROUNDFETCH_PROVIDER=gemini
+# Run multiple providers concurrently and merge/dedupe results by URL:
+# GROUNDFETCH_PROVIDERS=gemini,grok
 GROUNDFETCH_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GROUNDFETCH_TIMEOUT=30
 GROUNDFETCH_USER_AGENT=groundfetch/0.1
@@ -145,6 +148,37 @@ and for refreshing expired Antigravity access tokens with the stored
 `refresh_token`. It discovers `project_id` via `loadCodeAssist` when missing
 and falls back to `onboardUser` for first-use accounts.
 
+### Grok auth
+
+GroundFetch can use an existing Grok CLI login. Run `grok login` first; the CLI
+stores session credentials in `~/.grok/auth.json`. GroundFetch reads the active
+`https://auth.x.ai::<uuid>` entry, uses its `key` as a bearer token, and checks
+`expires_at`. Expired Grok tokens are not refreshed by GroundFetch; run
+`grok login` again.
+
+```dotenv
+GROUNDFETCH_PROVIDER=grok
+GROUNDFETCH_GROK_AUTH_FILE=~/.grok/auth.json
+GROUNDFETCH_GROK_BASE_URL=https://cli-chat-proxy.grok.com/v1
+GROUNDFETCH_GROK_MODEL=grok-build
+GROUNDFETCH_GROK_USER_AGENT=grok-cli/0.2.54
+GROUNDFETCH_GROK_CLIENT_VERSION=0.2.54
+```
+
+The Grok provider sends `POST /v1/responses` to the CLI chat proxy with
+`tools: [{"type":"web_search"}]`, `X-XAI-Token-Auth: xai-grok-cli`,
+`x-grok-model-override`, and `x-grok-client-version`. Results are parsed from
+`output_text.annotations` entries of type `url_citation`, with
+`web_search_call.action.sources` used as fallback source candidates.
+
+### Provider aggregation
+
+Set `GROUNDFETCH_PROVIDERS=gemini,grok` or pass
+`--provider gemini,grok` to run providers concurrently. GroundFetch returns
+results from providers that succeeded, omits failed providers from
+`providersUsed`, dedupes by exact URL, and interleaves results round-robin in
+the requested provider order before renumbering positions.
+
 Local project `.env` files are also loaded after the user-level config, without
 overriding live environment variables.
 
@@ -152,6 +186,7 @@ overriding live environment variables.
 
 ```bash
 groundfetch --query "Cloudflare Workers cron triggers official docs" --limit 3
+groundfetch --provider gemini,grok --query "Cloudflare Workers cron triggers official docs" --limit 5
 ```
 
 Example output:
@@ -168,7 +203,7 @@ Example output:
         "url": "https://example.com",
         "description": "Short grounded summary from the model response.",
         "position": 1,
-        "provider": "groundfetch"
+        "provider": "gemini"
       }
     ]
   }

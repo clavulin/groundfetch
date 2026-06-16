@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -31,6 +31,11 @@ DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT = 10
 DEFAULT_ANTIGRAVITY_AUTH_DIR = Path.home() / ".cli-proxy-api"
 DEFAULT_ANTIGRAVITY_USER_AGENT = "antigravity/2.0.11 darwin/arm64"
 DEFAULT_ANTIGRAVITY_CALLBACK_PORT = 51121
+DEFAULT_GROK_AUTH_FILE = Path.home() / ".grok" / "auth.json"
+DEFAULT_GROK_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
+DEFAULT_GROK_MODEL = "grok-build"
+DEFAULT_GROK_USER_AGENT = "grok-cli/0.2.54"
+DEFAULT_GROK_CLIENT_VERSION = "0.2.54"
 
 MAX_LIMIT = 20
 DESCRIPTION_MAX_LEN = 500
@@ -42,7 +47,8 @@ GROUNDING_REDIRECT_PATH_PREFIX = "/grounding-api-redirect/"
 
 PROVIDER_GEMINI = "gemini"
 PROVIDER_ANTIGRAVITY = "antigravity"
-PROVIDERS = {PROVIDER_GEMINI, PROVIDER_ANTIGRAVITY}
+PROVIDER_GROK = "grok"
+PROVIDERS = {PROVIDER_GEMINI, PROVIDER_ANTIGRAVITY, PROVIDER_GROK}
 
 ANTIGRAVITY_CLIENT_ID_ENV = "GROUNDFETCH_ANTIGRAVITY_CLIENT_ID"
 ANTIGRAVITY_CLIENT_SECRET_ENV = "GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET"
@@ -67,6 +73,9 @@ ANTIGRAVITY_SCOPES = (
     "https://www.googleapis.com/auth/cclog",
     "https://www.googleapis.com/auth/experimentsandconfigs",
 )
+
+GROK_RESPONSES_PATH = "/responses"
+GROK_TOKEN_AUTH_HEADER = "xai-grok-cli"
 
 
 class GroundFetchError(RuntimeError):
@@ -148,6 +157,12 @@ class Config:
     antigravity_user_agent: str = DEFAULT_ANTIGRAVITY_USER_AGENT
     antigravity_client_id: str = ""
     antigravity_client_secret: str = ""
+    grok_auth_file: str = str(DEFAULT_GROK_AUTH_FILE)
+    grok_base_url: str = DEFAULT_GROK_BASE_URL
+    grok_model: str = DEFAULT_GROK_MODEL
+    grok_user_agent: str = DEFAULT_GROK_USER_AGENT
+    grok_client_version: str = DEFAULT_GROK_CLIENT_VERSION
+    providers: tuple[str, ...] = (PROVIDER_GEMINI,)
 
     @classmethod
     def from_env(
@@ -174,24 +189,40 @@ class Config:
         antigravity_base_urls = parse_antigravity_base_urls(
             os.environ.get("GROUNDFETCH_ANTIGRAVITY_BASE_URL", "")
         )
+        grok_auth_file = (
+            os.environ.get("GROUNDFETCH_GROK_AUTH_FILE", "").strip()
+            or str(DEFAULT_GROK_AUTH_FILE)
+        )
+        grok_base_url = (
+            os.environ.get("GROUNDFETCH_GROK_BASE_URL", "").strip().rstrip("/")
+            or DEFAULT_GROK_BASE_URL
+        )
+        grok_model = os.environ.get("GROUNDFETCH_GROK_MODEL", "").strip() or DEFAULT_GROK_MODEL
+        grok_user_agent = (
+            os.environ.get("GROUNDFETCH_GROK_USER_AGENT", "").strip()
+            or DEFAULT_GROK_USER_AGENT
+        )
+        grok_client_version = (
+            os.environ.get("GROUNDFETCH_GROK_CLIENT_VERSION", "").strip()
+            or DEFAULT_GROK_CLIENT_VERSION
+        )
 
-        provider = (provider_override or "").strip().lower().replace("-", "_")
-        if not provider:
-            provider = (
-                os.environ.get("GROUNDFETCH_PROVIDER", "").strip().lower().replace("-", "_")
-            )
-        if not provider:
+        provider_source = (provider_override or "").strip()
+        if not provider_source:
+            provider_source = os.environ.get("GROUNDFETCH_PROVIDERS", "").strip()
+        if not provider_source:
+            provider_source = os.environ.get("GROUNDFETCH_PROVIDER", "").strip()
+        if provider_source:
+            providers = parse_providers(provider_source)
+            provider = providers[0]
+        else:
             if default_provider:
                 provider = default_provider
             elif antigravity_auth_file:
                 provider = PROVIDER_ANTIGRAVITY
             else:
                 provider = PROVIDER_GEMINI
-        if provider not in PROVIDERS:
-            raise ConfigError(
-                "GROUNDFETCH_PROVIDER must be one of "
-                f"{', '.join(sorted(PROVIDERS))}, got {provider!r}"
-            )
+            providers = (provider,)
 
         auth_mode = (
             os.environ.get("GROUNDFETCH_AUTH", "").strip().lower().replace("-", "_")
@@ -225,14 +256,18 @@ class Config:
                 f"got {raw_oauth_token_command_timeout!r}"
             ) from exc
 
-        if provider == PROVIDER_GEMINI and auth_mode == AUTH_API_KEY and not api_key:
+        if (
+            providers == (PROVIDER_GEMINI,)
+            and auth_mode == AUTH_API_KEY
+            and not api_key
+        ):
             raise ConfigError(
                 "GROUNDFETCH_API_KEY is not set "
                 f"(looked in env and {ENV_FILE}); set GROUNDFETCH_AUTH=oauth "
                 "with GROUNDFETCH_OAUTH_TOKEN or GROUNDFETCH_OAUTH_TOKEN_COMMAND "
                 "to use OAuth"
             )
-        if provider == PROVIDER_GEMINI and auth_mode == AUTH_OAUTH and not (
+        if providers == (PROVIDER_GEMINI,) and auth_mode == AUTH_OAUTH and not (
             oauth_token or oauth_token_command
         ):
             raise ConfigError(
@@ -263,6 +298,12 @@ class Config:
             antigravity_user_agent=antigravity_user_agent,
             antigravity_client_id=antigravity_client_id,
             antigravity_client_secret=antigravity_client_secret,
+            grok_auth_file=grok_auth_file,
+            grok_base_url=grok_base_url,
+            grok_model=grok_model,
+            grok_user_agent=grok_user_agent,
+            grok_client_version=grok_client_version,
+            providers=providers,
         )
 
     @property
@@ -303,6 +344,32 @@ def parse_antigravity_base_urls(raw: str) -> tuple[str, ...]:
         if value.strip().rstrip("/")
     ]
     return tuple(values) or ANTIGRAVITY_DEFAULT_BASE_URLS
+
+
+def parse_providers(raw: str) -> tuple[str, ...]:
+    providers: list[str] = []
+    seen: set[str] = set()
+    for value in raw.split(","):
+        provider = value.strip().lower().replace("-", "_")
+        if not provider:
+            continue
+        if provider not in PROVIDERS:
+            raise ConfigError(
+                "GROUNDFETCH_PROVIDER/GROUNDFETCH_PROVIDERS must contain only "
+                f"{', '.join(sorted(PROVIDERS))}, got {provider!r}"
+            )
+        if provider not in seen:
+            seen.add(provider)
+            providers.append(provider)
+    if not providers:
+        raise ConfigError("provider list must include at least one provider")
+    return tuple(providers)
+
+
+def selected_providers(config: Config) -> tuple[str, ...]:
+    if config.providers == (PROVIDER_GEMINI,) and config.provider != PROVIDER_GEMINI:
+        return (config.provider,)
+    return config.providers
 
 
 def expand_path(path: str) -> Path:
@@ -460,6 +527,13 @@ def parse_rfc3339(value: str) -> datetime | None:
         return None
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
+    if "." in value:
+        dot = value.find(".")
+        end = dot + 1
+        while end < len(value) and value[end].isdigit():
+            end += 1
+        if end - dot > 7:
+            value = value[: dot + 7] + value[end:]
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError:
@@ -1078,6 +1152,82 @@ def unwrap_antigravity_response(payload: dict[str, Any]) -> dict[str, Any]:
     return response if isinstance(response, dict) else payload
 
 
+def load_grok_auth(config: Config) -> dict[str, Any]:
+    path = expand_path(config.grok_auth_file)
+    payload = read_json_file(path)
+    candidates: list[tuple[datetime, dict[str, Any]]] = []
+    expired_with_token = False
+    now = datetime.now(timezone.utc)
+
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.startswith("https://auth.x.ai::"):
+            continue
+        if not isinstance(value, dict) or not normalize(value.get("key")):
+            continue
+        expires_at = parse_rfc3339(normalize(value.get("expires_at")))
+        if expires_at is not None and expires_at <= now:
+            expired_with_token = True
+            continue
+        candidates.append((expires_at or datetime.max.replace(tzinfo=timezone.utc), value))
+
+    if candidates:
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    if expired_with_token:
+        raise ConfigError(
+            f"Grok auth token in {path} is expired; run `grok login` to re-authenticate"
+        )
+    raise ConfigError(f"Grok auth file has no active https://auth.x.ai session token: {path}")
+
+
+def grok_body(config: Config, query: str) -> dict[str, Any]:
+    return {
+        "model": config.grok_model,
+        "input": query,
+        "tools": [{"type": "web_search"}],
+        "tool_choice": "auto",
+        "stream": False,
+    }
+
+
+def build_grok_headers(config: Config, token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": config.grok_user_agent,
+        "X-XAI-Token-Auth": GROK_TOKEN_AUTH_HEADER,
+        "x-grok-model-override": config.grok_model,
+        "x-grok-client-version": config.grok_client_version,
+    }
+
+
+def post_grok_responses(config: Config, query: str) -> dict[str, Any]:
+    metadata = load_grok_auth(config)
+    token = normalize(metadata.get("key"))
+    endpoint = config.grok_base_url.rstrip("/") + GROK_RESPONSES_PATH
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(grok_body(config, query)).encode("utf-8"),
+        headers=build_grok_headers(config, token),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=config.timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise UpstreamError("Grok returned unexpected JSON")
+            return payload
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise UpstreamError(f"HTTP {exc.code} from {endpoint}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise UpstreamError(f"connection to {endpoint} failed: {exc.reason}") from exc
+    except json.JSONDecodeError as exc:
+        raise UpstreamError("Grok returned invalid JSON") from exc
+
+
 def extract_summary(candidate: dict[str, Any]) -> str:
     parts = ((candidate.get("content") or {}).get("parts")) or []
     texts = [normalize(part.get("text")) for part in parts if isinstance(part, dict)]
@@ -1089,6 +1239,7 @@ def extract_results(
     summary: str,
     limit: int,
     user_agent: str,
+    provider_used: str,
 ) -> list[WebResult]:
     chunks = ((candidate.get("groundingMetadata") or {}).get("groundingChunks")) or []
     description = summary[:DESCRIPTION_MAX_LEN] if summary else ""
@@ -1113,11 +1264,119 @@ def extract_results(
                 url=url,
                 description=description,
                 position=len(results) + 1,
-                provider="groundfetch",
+                provider=provider_used,
             )
         )
 
     return results
+
+
+def grok_output_text(payload: dict[str, Any]) -> str:
+    texts: list[str] = []
+    output = payload.get("output") or []
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") or []
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            text = normalize(part.get("text"))
+            if text:
+                texts.append(text)
+    return "\n".join(texts)
+
+
+def iter_grok_source_candidates(payload: dict[str, Any]) -> list[dict[str, str]]:
+    annotation_candidates: list[dict[str, str]] = []
+    search_candidates: list[dict[str, str]] = []
+    output = payload.get("output") or []
+    if not isinstance(output, list):
+        return []
+
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") or []
+        if isinstance(content, list):
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                annotations = part.get("annotations") or []
+                if not isinstance(annotations, list):
+                    continue
+                for annotation in annotations:
+                    if not isinstance(annotation, dict):
+                        continue
+                    if annotation.get("type") != "url_citation":
+                        continue
+                    url = normalize(annotation.get("url"))
+                    if url:
+                        annotation_candidates.append(
+                            {"url": url, "title": normalize(annotation.get("title"))}
+                        )
+        if item.get("type") != "web_search_call":
+            continue
+        action = item.get("action") or {}
+        if not isinstance(action, dict):
+            continue
+        sources = action.get("sources") or []
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            url = normalize(source.get("url"))
+            if url:
+                search_candidates.append({"url": url, "title": normalize(source.get("title"))})
+    return annotation_candidates + search_candidates
+
+
+def parse_grok_response(payload: dict[str, Any], limit: int) -> SearchResponse:
+    if not isinstance(payload, dict):
+        raise UpstreamError(f"unexpected Grok response shape: {type(payload).__name__}")
+    if payload.get("error"):
+        error = payload["error"]
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("code") or "unknown"
+        else:
+            message = str(error)
+        raise UpstreamError(f"Grok API error: {message}")
+
+    summary = grok_output_text(payload)
+    description = summary[:DESCRIPTION_MAX_LEN] if summary else ""
+    seen: set[str] = set()
+    results: list[WebResult] = []
+    for candidate in iter_grok_source_candidates(payload):
+        if len(results) >= limit:
+            break
+        url = candidate["url"]
+        if url in seen:
+            continue
+        seen.add(url)
+        title = candidate.get("title") or url
+        if title.isdigit():
+            title = url
+        results.append(
+            WebResult(
+                title=title,
+                url=url,
+                description=description,
+                position=len(results) + 1,
+                provider=PROVIDER_GROK,
+            )
+        )
+
+    return SearchResponse(
+        success=True,
+        provider="groundfetch",
+        providersUsed=[PROVIDER_GROK],
+        data={"web": results},
+    )
 
 
 def parse_response(
@@ -1139,7 +1398,7 @@ def parse_response(
     candidates = payload.get("candidates") or []
     candidate = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
     summary = extract_summary(candidate)
-    results = extract_results(candidate, summary, limit, user_agent)
+    results = extract_results(candidate, summary, limit, user_agent, provider_used)
 
     return SearchResponse(
         success=True,
@@ -1149,19 +1408,130 @@ def parse_response(
     )
 
 
+def validate_gemini_auth(config: Config) -> None:
+    if config.auth_mode == AUTH_API_KEY and not config.api_key:
+        raise ConfigError(
+            "GROUNDFETCH_API_KEY is not set "
+            f"(looked in env and {ENV_FILE}); set GROUNDFETCH_AUTH=oauth "
+            "with GROUNDFETCH_OAUTH_TOKEN or GROUNDFETCH_OAUTH_TOKEN_COMMAND "
+            "to use OAuth"
+        )
+    if config.auth_mode == AUTH_OAUTH and not (
+        config.oauth_token or config.oauth_token_command
+    ):
+        raise ConfigError(
+            "OAuth auth requires GROUNDFETCH_OAUTH_TOKEN or "
+            "GROUNDFETCH_OAUTH_TOKEN_COMMAND"
+        )
+
+
+def search_with_provider(config: Config, query: str, limit: int, provider: str) -> SearchResponse:
+    provider_config = (
+        config
+        if config.provider == provider
+        else replace(config, provider=provider, providers=(provider,))
+    )
+    if provider == PROVIDER_ANTIGRAVITY:
+        payload = post_antigravity_generate_content(provider_config, query)
+        return parse_response(
+            payload,
+            limit,
+            provider_config.user_agent,
+            provider_used=PROVIDER_ANTIGRAVITY,
+        )
+    if provider == PROVIDER_GROK:
+        payload = post_grok_responses(provider_config, query)
+        return parse_grok_response(payload, limit)
+    validate_gemini_auth(provider_config)
+    payload = post_generate_content(provider_config, query)
+    return parse_response(payload, limit, provider_config.user_agent)
+
+
+def merge_provider_responses(
+    responses: dict[str, SearchResponse],
+    provider_order: tuple[str, ...],
+    limit: int,
+) -> SearchResponse:
+    providers_used = [provider for provider in provider_order if provider in responses]
+    web_by_provider = [
+        list(responses[provider]["data"].get("web", []))
+        for provider in providers_used
+    ]
+    seen: set[str] = set()
+    merged: list[WebResult] = []
+    index = 0
+    while len(merged) < limit and any(index < len(items) for items in web_by_provider):
+        for items in web_by_provider:
+            if len(merged) >= limit:
+                break
+            if index >= len(items):
+                continue
+            item = items[index]
+            url = item["url"]
+            if url in seen:
+                continue
+            seen.add(url)
+            updated = WebResult(
+                title=item["title"],
+                url=item["url"],
+                description=item["description"],
+                position=len(merged) + 1,
+                provider=item["provider"],
+            )
+            merged.append(updated)
+        index += 1
+
+    return SearchResponse(
+        success=True,
+        provider="groundfetch",
+        providersUsed=providers_used,
+        data={"web": merged},
+    )
+
+
+def aggregate_search(
+    config: Config,
+    query: str,
+    limit: int,
+    providers: tuple[str, ...],
+) -> SearchResponse:
+    responses: dict[str, SearchResponse] = {}
+    errors: dict[str, GroundFetchError] = {}
+    lock = threading.Lock()
+
+    def run(provider: str) -> None:
+        try:
+            response = search_with_provider(config, query, limit, provider)
+        except GroundFetchError as exc:
+            with lock:
+                errors[provider] = exc
+            return
+        with lock:
+            responses[provider] = response
+
+    threads = [threading.Thread(target=run, args=(provider,)) for provider in providers]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if responses:
+        return merge_provider_responses(responses, providers, limit)
+
+    for provider in providers:
+        if provider in errors:
+            raise errors[provider]
+    raise UpstreamError("all providers failed")
+
+
 def search(query: str, *, limit: int = 5, config: Config | None = None) -> SearchResponse:
     if not query or not query.strip():
         raise ConfigError("query must be a non-empty string")
 
     bounded_limit = max(1, min(limit, MAX_LIMIT))
     cfg = config or Config.from_env()
-    if cfg.provider == PROVIDER_ANTIGRAVITY:
-        payload = post_antigravity_generate_content(cfg, query.strip())
-        return parse_response(
-            payload,
-            bounded_limit,
-            cfg.user_agent,
-            provider_used=PROVIDER_ANTIGRAVITY,
-        )
-    payload = post_generate_content(cfg, query.strip())
-    return parse_response(payload, bounded_limit, cfg.user_agent)
+    providers = selected_providers(cfg)
+    stripped_query = query.strip()
+    if len(providers) > 1:
+        return aggregate_search(cfg, stripped_query, bounded_limit, providers)
+    return search_with_provider(cfg, stripped_query, bounded_limit, providers[0])

@@ -14,6 +14,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--query", "-q", help="Search query text")
     parser.add_argument("--limit", "-n", type=int, default=5, help="Maximum results, 1-20")
     parser.add_argument(
+        "--provider",
+        help="Provider or comma-separated providers: gemini, antigravity, grok",
+    )
+    parser.add_argument(
         "--login-antigravity",
         action="store_true",
         help="Run Antigravity OAuth login and save a CLIProxyAPI-compatible auth JSON",
@@ -63,7 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.query:
             parser.error("--query is required unless --login-antigravity is used")
 
-        result = search(args.query, limit=args.limit)
+        config = Config.from_env(provider_override=args.provider) if args.provider else None
+        result = search(args.query, limit=args.limit, config=config)
     except GroundFetchError as exc:
         print(f"groundfetch error: {exc}", file=sys.stderr)
         return 1
