@@ -2,17 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import http.server
-import queue
-import secrets
-import shlex
-import subprocess
 import sys
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-import webbrowser
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
@@ -27,12 +21,11 @@ DEFAULT_MODEL = "gemini-3.1-flash-lite"
 DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 DEFAULT_TIMEOUT = 30
 DEFAULT_USER_AGENT = "groundfetch/0.1"
-DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT = 10
 DEFAULT_ANTIGRAVITY_AUTH_DIR = Path.home() / ".cli-proxy-api"
 DEFAULT_ANTIGRAVITY_USER_AGENT = "antigravity/2.0.11 darwin/arm64"
-DEFAULT_ANTIGRAVITY_CALLBACK_PORT = 51121
 DEFAULT_GROK_AUTH_FILE = Path.home() / ".grok" / "auth.json"
 DEFAULT_GROK_BASE_URL = "https://cli-chat-proxy.grok.com/v1"
+DEFAULT_GROK_API_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_GROK_MODEL = "grok-build"
 DEFAULT_GROK_USER_AGENT = "grok-cli/0.2.54"
 DEFAULT_GROK_CLIENT_VERSION = "0.2.54"
@@ -52,9 +45,7 @@ PROVIDERS = {PROVIDER_GEMINI, PROVIDER_ANTIGRAVITY, PROVIDER_GROK}
 
 ANTIGRAVITY_CLIENT_ID_ENV = "GROUNDFETCH_ANTIGRAVITY_CLIENT_ID"
 ANTIGRAVITY_CLIENT_SECRET_ENV = "GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET"
-ANTIGRAVITY_AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 ANTIGRAVITY_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
-ANTIGRAVITY_USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v2/userinfo?alt=json"
 ANTIGRAVITY_GENERATE_PATH = "/v1internal:generateContent"
 ANTIGRAVITY_LOAD_CODE_ASSIST_PATH = "/v1internal:loadCodeAssist"
 ANTIGRAVITY_ONBOARD_USER_PATH = "/v1internal:onboardUser"
@@ -66,13 +57,6 @@ ANTIGRAVITY_PROJECT_BASE_URL = "https://cloudcode-pa.googleapis.com"
 ANTIGRAVITY_DAILY_BASE_URL = "https://daily-cloudcode-pa.googleapis.com"
 ANTIGRAVITY_NODE_API_CLIENT_UA = "google-api-nodejs-client/10.3.0"
 ANTIGRAVITY_GOOG_API_CLIENT_UA = "gl-node/22.21.1"
-ANTIGRAVITY_SCOPES = (
-    "https://www.googleapis.com/auth/cloud-platform",
-    "https://www.googleapis.com/auth/userinfo.email",
-    "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/cclog",
-    "https://www.googleapis.com/auth/experimentsandconfigs",
-)
 
 GROK_RESPONSES_PATH = "/responses"
 GROK_TOKEN_AUTH_HEADER = "xai-grok-cli"
@@ -106,36 +90,9 @@ class SearchResponse(TypedDict):
 
 
 @dataclass(frozen=True)
-class AntigravityLoginResult:
-    auth_file: Path
-    email: str
-    project_id: str
-
-
-@dataclass(frozen=True)
-class AntigravityLoginRequest:
-    state: str
-    redirect_uri: str
-    auth_url: str
-
-
-@dataclass(frozen=True)
 class AntigravityOAuthCredentials:
     client_id: str
     client_secret: str
-
-
-@dataclass(frozen=True)
-class OAuthCallback:
-    code: str
-    state: str
-    error: str = ""
-    error_description: str = ""
-
-
-AUTH_API_KEY = "api_key"
-AUTH_OAUTH = "oauth"
-AUTH_MODES = {AUTH_API_KEY, AUTH_OAUTH}
 
 
 @dataclass(frozen=True)
@@ -145,11 +102,6 @@ class Config:
     model: str
     timeout: int
     user_agent: str
-    auth_mode: str = AUTH_API_KEY
-    oauth_token: str = ""
-    oauth_token_command: str = ""
-    oauth_project: str = ""
-    oauth_token_command_timeout: int = DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT
     provider: str = PROVIDER_GEMINI
     antigravity_auth_file: str = ""
     antigravity_auth_dir: str = str(DEFAULT_ANTIGRAVITY_AUTH_DIR)
@@ -158,6 +110,7 @@ class Config:
     antigravity_client_id: str = ""
     antigravity_client_secret: str = ""
     grok_auth_file: str = str(DEFAULT_GROK_AUTH_FILE)
+    grok_api_key: str = ""
     grok_base_url: str = DEFAULT_GROK_BASE_URL
     grok_model: str = DEFAULT_GROK_MODEL
     grok_user_agent: str = DEFAULT_GROK_USER_AGENT
@@ -172,9 +125,6 @@ class Config:
         provider_override: str | None = None,
     ) -> "Config":
         api_key = os.environ.get("GROUNDFETCH_API_KEY", "").strip()
-        oauth_token = os.environ.get("GROUNDFETCH_OAUTH_TOKEN", "").strip()
-        oauth_token_command = os.environ.get("GROUNDFETCH_OAUTH_TOKEN_COMMAND", "").strip()
-        oauth_project = os.environ.get("GROUNDFETCH_OAUTH_PROJECT", "").strip()
         antigravity_auth_file = os.environ.get("GROUNDFETCH_ANTIGRAVITY_AUTH_FILE", "").strip()
         antigravity_auth_dir = (
             os.environ.get("GROUNDFETCH_ANTIGRAVITY_AUTH_DIR", "").strip()
@@ -193,10 +143,14 @@ class Config:
             os.environ.get("GROUNDFETCH_GROK_AUTH_FILE", "").strip()
             or str(DEFAULT_GROK_AUTH_FILE)
         )
-        grok_base_url = (
-            os.environ.get("GROUNDFETCH_GROK_BASE_URL", "").strip().rstrip("/")
-            or DEFAULT_GROK_BASE_URL
-        )
+        grok_api_key = os.environ.get("GROUNDFETCH_GROK_API_KEY", "").strip()
+        raw_grok_base_url = os.environ.get("GROUNDFETCH_GROK_BASE_URL", "").strip().rstrip("/")
+        if raw_grok_base_url:
+            grok_base_url = raw_grok_base_url
+        elif grok_api_key:
+            grok_base_url = DEFAULT_GROK_API_BASE_URL
+        else:
+            grok_base_url = DEFAULT_GROK_BASE_URL
         grok_model = os.environ.get("GROUNDFETCH_GROK_MODEL", "").strip() or DEFAULT_GROK_MODEL
         grok_user_agent = (
             os.environ.get("GROUNDFETCH_GROK_USER_AGENT", "").strip()
@@ -228,55 +182,16 @@ class Config:
             if parsed_grok_base_url.scheme != "https" or not parsed_grok_base_url.netloc:
                 raise ConfigError("GROUNDFETCH_GROK_BASE_URL must be an https URL")
 
-        auth_mode = (
-            os.environ.get("GROUNDFETCH_AUTH", "").strip().lower().replace("-", "_")
-        )
-        if auth_mode and auth_mode not in AUTH_MODES:
-            raise ConfigError(
-                "GROUNDFETCH_AUTH must be one of "
-                f"{', '.join(sorted(AUTH_MODES))}, got {auth_mode!r}"
-            )
-        if not auth_mode:
-            auth_mode = AUTH_OAUTH if oauth_token or oauth_token_command else AUTH_API_KEY
-
         raw_timeout = os.environ.get("GROUNDFETCH_TIMEOUT", "").strip()
         try:
             timeout = int(raw_timeout) if raw_timeout else DEFAULT_TIMEOUT
         except ValueError as exc:
             raise ConfigError(f"GROUNDFETCH_TIMEOUT must be an integer, got {raw_timeout!r}") from exc
 
-        raw_oauth_token_command_timeout = (
-            os.environ.get("GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT", "").strip()
-        )
-        try:
-            oauth_token_command_timeout = (
-                int(raw_oauth_token_command_timeout)
-                if raw_oauth_token_command_timeout
-                else DEFAULT_OAUTH_TOKEN_COMMAND_TIMEOUT
-            )
-        except ValueError as exc:
-            raise ConfigError(
-                "GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT must be an integer, "
-                f"got {raw_oauth_token_command_timeout!r}"
-            ) from exc
-
-        if (
-            providers == (PROVIDER_GEMINI,)
-            and auth_mode == AUTH_API_KEY
-            and not api_key
-        ):
+        if providers == (PROVIDER_GEMINI,) and not api_key:
             raise ConfigError(
                 "GROUNDFETCH_API_KEY is not set "
-                f"(looked in env and {ENV_FILE}); set GROUNDFETCH_AUTH=oauth "
-                "with GROUNDFETCH_OAUTH_TOKEN or GROUNDFETCH_OAUTH_TOKEN_COMMAND "
-                "to use OAuth"
-            )
-        if providers == (PROVIDER_GEMINI,) and auth_mode == AUTH_OAUTH and not (
-            oauth_token or oauth_token_command
-        ):
-            raise ConfigError(
-                "OAuth auth requires GROUNDFETCH_OAUTH_TOKEN or "
-                "GROUNDFETCH_OAUTH_TOKEN_COMMAND"
+                f"(looked in env and {ENV_FILE})"
             )
 
         base_url = (
@@ -290,11 +205,6 @@ class Config:
             model=model,
             timeout=timeout,
             user_agent=user_agent,
-            auth_mode=auth_mode,
-            oauth_token=oauth_token,
-            oauth_token_command=oauth_token_command,
-            oauth_project=oauth_project,
-            oauth_token_command_timeout=oauth_token_command_timeout,
             provider=provider,
             antigravity_auth_file=antigravity_auth_file,
             antigravity_auth_dir=antigravity_auth_dir,
@@ -303,6 +213,7 @@ class Config:
             antigravity_client_id=antigravity_client_id,
             antigravity_client_secret=antigravity_client_secret,
             grok_auth_file=grok_auth_file,
+            grok_api_key=grok_api_key,
             grok_base_url=grok_base_url,
             grok_model=grok_model,
             grok_user_agent=grok_user_agent,
@@ -417,63 +328,13 @@ def resolve_redirect(url: str, user_agent: str) -> str:
     return url
 
 
-def oauth_authorization_header(config: Config) -> str:
-    token = config.oauth_token
-    if not token and config.oauth_token_command:
-        try:
-            args = shlex.split(config.oauth_token_command)
-        except ValueError as exc:
-            raise ConfigError(
-                f"GROUNDFETCH_OAUTH_TOKEN_COMMAND is invalid: {exc}"
-            ) from exc
-        if not args:
-            raise ConfigError("GROUNDFETCH_OAUTH_TOKEN_COMMAND is empty")
-        try:
-            result = subprocess.run(
-                args,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=config.oauth_token_command_timeout,
-            )
-        except FileNotFoundError as exc:
-            raise ConfigError(
-                "GROUNDFETCH_OAUTH_TOKEN_COMMAND executable was not found: "
-                f"{args[0]!r}"
-            ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise ConfigError(
-                "GROUNDFETCH_OAUTH_TOKEN_COMMAND timed out after "
-                f"{config.oauth_token_command_timeout}s"
-            ) from exc
-
-        if result.returncode != 0:
-            detail = result.stderr.strip() or "no stderr"
-            raise ConfigError(
-                "GROUNDFETCH_OAUTH_TOKEN_COMMAND failed with exit "
-                f"{result.returncode}: {detail[:500]}"
-            )
-        token = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
-
-    if not token:
-        raise ConfigError("OAuth token command returned no token")
-
-    return token if token.lower().startswith("bearer ") else f"Bearer {token}"
-
-
 def build_headers(config: Config) -> dict[str, str]:
-    headers = {
+    return {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "User-Agent": config.user_agent,
+        "x-goog-api-key": config.api_key,
     }
-    if config.auth_mode == AUTH_OAUTH:
-        headers["Authorization"] = oauth_authorization_header(config)
-        if config.oauth_project:
-            headers["x-goog-user-project"] = config.oauth_project
-    else:
-        headers["x-goog-api-key"] = config.api_key
-    return headers
 
 
 def post_generate_content(config: Config, query: str) -> dict[str, Any]:
@@ -524,8 +385,8 @@ def find_antigravity_auth_file(config: Config) -> Path:
         return expand_path(config.antigravity_auth_file)
 
     raise ConfigError(
-        "GROUNDFETCH_ANTIGRAVITY_AUTH_FILE is required for existing Antigravity auth JSON; "
-        "run groundfetch --login-antigravity to create one"
+        "GROUNDFETCH_ANTIGRAVITY_AUTH_FILE is required; point it at an existing "
+        "Antigravity OAuth auth JSON (for example one produced by CLIProxyAPI)"
     )
 
 
@@ -585,7 +446,7 @@ def antigravity_oauth_credentials(config: Config) -> AntigravityOAuthCredentials
     client_secret = normalize(config.antigravity_client_secret)
     if not client_id or not client_secret:
         raise ConfigError(
-            f"Antigravity OAuth login and token refresh require {ANTIGRAVITY_CLIENT_ID_ENV} "
+            f"Refreshing an expired Antigravity access token requires {ANTIGRAVITY_CLIENT_ID_ENV} "
             f"and {ANTIGRAVITY_CLIENT_SECRET_ENV}"
         )
     return AntigravityOAuthCredentials(client_id=client_id, client_secret=client_secret)
@@ -643,15 +504,6 @@ def write_auth_metadata(path: Path, metadata: dict[str, Any]) -> None:
         pass
 
 
-def save_auth_metadata(path: Path, metadata: dict[str, Any]) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as handle:
-            json.dump(metadata, handle, separators=(",", ":"))
-    except OSError as exc:
-        raise ConfigError(f"could not write Antigravity auth file {path}: {exc}") from exc
-
-
 def load_antigravity_auth(config: Config) -> tuple[dict[str, Any], Path]:
     path = find_antigravity_auth_file(config)
     metadata = read_json_file(path)
@@ -665,276 +517,6 @@ def load_antigravity_auth(config: Config) -> tuple[dict[str, Any], Path]:
     if not normalize(metadata.get("access_token")):
         raise ConfigError(f"Antigravity auth file has no access_token: {path}")
     return metadata, path
-
-
-def build_antigravity_auth_url(config: Config, state: str, redirect_uri: str) -> str:
-    credentials = antigravity_oauth_credentials(config)
-    params = urllib.parse.urlencode(
-        {
-            "access_type": "offline",
-            "client_id": credentials.client_id,
-            "prompt": "consent",
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": " ".join(ANTIGRAVITY_SCOPES),
-            "state": state,
-        }
-    )
-    return f"{ANTIGRAVITY_AUTH_ENDPOINT}?{params}"
-
-
-def create_antigravity_login_request(config: Config, callback_port: int) -> AntigravityLoginRequest:
-    antigravity_oauth_credentials(config)
-    if callback_port <= 0:
-        raise ConfigError("manual Antigravity OAuth callback port must be greater than 0")
-    state = secrets.token_urlsafe(24)
-    redirect_uri = f"http://localhost:{callback_port}/oauth-callback"
-    auth_url = build_antigravity_auth_url(config, state, redirect_uri)
-    return AntigravityLoginRequest(state=state, redirect_uri=redirect_uri, auth_url=auth_url)
-
-
-def parse_oauth_callback(callback_url: str) -> OAuthCallback:
-    candidate = callback_url.strip()
-    if not candidate:
-        raise ConfigError("Antigravity OAuth callback URL is required")
-    if "://" not in candidate:
-        if candidate.startswith("?"):
-            candidate = "http://localhost" + candidate
-        elif any(part in candidate for part in ("/", "?", "#")) or ":" in candidate:
-            candidate = "http://" + candidate
-        elif "=" in candidate:
-            candidate = "http://localhost/?" + candidate
-        else:
-            raise ConfigError("invalid Antigravity OAuth callback URL")
-
-    parsed = urllib.parse.urlparse(candidate)
-    params = urllib.parse.parse_qs(parsed.query)
-
-    def first(name: str) -> str:
-        return normalize(params.get(name, [""])[0])
-
-    code = first("code")
-    state = first("state")
-    error = first("error")
-    error_description = first("error_description")
-
-    if parsed.fragment:
-        fragment_params = urllib.parse.parse_qs(parsed.fragment)
-
-        def first_fragment(name: str) -> str:
-            return normalize(fragment_params.get(name, [""])[0])
-
-        code = code or first_fragment("code")
-        state = state or first_fragment("state")
-        error = error or first_fragment("error")
-        error_description = error_description or first_fragment("error_description")
-
-    if code and not state and "#" in code:
-        code, state = code.split("#", 1)
-        code = normalize(code)
-        state = normalize(state)
-    if not error and error_description:
-        error = error_description
-        error_description = ""
-    if not code and not error:
-        raise ConfigError("Antigravity OAuth callback URL has no code")
-    return OAuthCallback(
-        code=code,
-        state=state,
-        error=error,
-        error_description=error_description,
-    )
-
-
-def validate_antigravity_callback(callback: OAuthCallback, expected_state: str) -> str:
-    if callback.error:
-        detail = callback.error_description or callback.error
-        raise ConfigError(f"Antigravity OAuth login failed: {detail}")
-    if callback.state != expected_state:
-        raise ConfigError("Antigravity OAuth login failed: state mismatch")
-    if not callback.code:
-        raise ConfigError("Antigravity OAuth login failed: missing authorization code")
-    return callback.code
-
-
-class AntigravityCallbackHandler(http.server.BaseHTTPRequestHandler):
-    result_queue: queue.Queue[dict[str, str]]
-
-    def do_GET(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/oauth-callback":
-            self.send_response(404)
-            self.end_headers()
-            return
-        params = urllib.parse.parse_qs(parsed.query)
-        result = {
-            "code": params.get("code", [""])[0],
-            "state": params.get("state", [""])[0],
-            "error": params.get("error", [""])[0],
-        }
-        self.result_queue.put(result)
-        ok = bool(result["code"] and not result["error"])
-        self.send_response(200 if ok else 400)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        message = "Login successful. You can close this window." if ok else "Login failed."
-        self.wfile.write(f"<h1>{message}</h1>".encode("utf-8"))
-
-    def log_message(self, format: str, *args: Any) -> None:
-        return
-
-
-def wait_for_antigravity_callback(config: Config, port: int, timeout: int) -> tuple[str, str]:
-    antigravity_oauth_credentials(config)
-    result_queue: queue.Queue[dict[str, str]] = queue.Queue(maxsize=1)
-    handler = type(
-        "GroundFetchAntigravityCallbackHandler",
-        (AntigravityCallbackHandler,),
-        {"result_queue": result_queue},
-    )
-    try:
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
-    except OSError as exc:
-        raise ConfigError(f"could not start Antigravity OAuth callback server: {exc}") from exc
-    actual_port = int(server.server_address[1])
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    login_request = create_antigravity_login_request(config, actual_port)
-    print(f"Open this URL to authenticate Antigravity:\n{login_request.auth_url}", file=sys.stderr)
-    try:
-        webbrowser.open(login_request.auth_url)
-    except Exception:
-        pass
-    try:
-        result = result_queue.get(timeout=timeout)
-    except queue.Empty as exc:
-        raise ConfigError("Antigravity OAuth login timed out") from exc
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    callback = OAuthCallback(
-        code=result.get("code", ""),
-        state=result.get("state", ""),
-        error=result.get("error", ""),
-    )
-    code = validate_antigravity_callback(callback, login_request.state)
-    return code, login_request.redirect_uri
-
-
-def wait_for_manual_antigravity_callback(
-    config: Config,
-    port: int,
-    *,
-    callback_url: str = "",
-    input_stream: Any = None,
-    output_stream: Any = None,
-) -> tuple[str, str]:
-    login_request = create_antigravity_login_request(config, port)
-    output = output_stream or sys.stderr
-    print(f"Open this URL to authenticate Antigravity:\n{login_request.auth_url}", file=output)
-    if not callback_url:
-        print("Paste the final localhost callback URL:", file=output)
-        stream = input_stream or sys.stdin
-        callback_url = stream.readline()
-    callback = parse_oauth_callback(callback_url)
-    code = validate_antigravity_callback(callback, login_request.state)
-    return code, login_request.redirect_uri
-
-
-def exchange_antigravity_code(config: Config, code: str, redirect_uri: str) -> dict[str, Any]:
-    credentials = antigravity_oauth_credentials(config)
-    form = urllib.parse.urlencode(
-        {
-            "code": code,
-            "client_id": credentials.client_id,
-            "client_secret": credentials.client_secret,
-            "redirect_uri": redirect_uri,
-            "grant_type": "authorization_code",
-        }
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        ANTIGRAVITY_TOKEN_ENDPOINT,
-        data=form,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=config.timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise UpstreamError(f"Antigravity token exchange failed: HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise UpstreamError(f"Antigravity token exchange failed: {exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise UpstreamError("Antigravity token exchange returned invalid JSON") from exc
-
-    if not isinstance(payload, dict):
-        raise UpstreamError("Antigravity token exchange returned unexpected JSON")
-    if not normalize(payload.get("access_token")):
-        raise UpstreamError("Antigravity token exchange returned no access_token")
-    return payload
-
-
-def fetch_antigravity_email(config: Config, access_token: str) -> str:
-    request = urllib.request.Request(
-        ANTIGRAVITY_USERINFO_ENDPOINT,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "User-Agent": config.antigravity_user_agent,
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=config.timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise UpstreamError(f"Antigravity userinfo failed: HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise UpstreamError(f"Antigravity userinfo failed: {exc.reason}") from exc
-    except json.JSONDecodeError as exc:
-        raise UpstreamError("Antigravity userinfo returned invalid JSON") from exc
-
-    if not isinstance(payload, dict):
-        raise UpstreamError("Antigravity userinfo returned unexpected JSON")
-    email = normalize(payload.get("email"))
-    if not email:
-        raise UpstreamError("Antigravity userinfo returned no email")
-    return email
-
-
-def credential_file_name(email: str) -> str:
-    email = email.strip()
-    return f"antigravity-{email}.json" if email else "antigravity.json"
-
-
-def login_antigravity(
-    config: Config,
-    *,
-    callback_port: int = DEFAULT_ANTIGRAVITY_CALLBACK_PORT,
-    manual_callback: bool = False,
-    callback_url: str = "",
-) -> AntigravityLoginResult:
-    if manual_callback or callback_url:
-        code, redirect_uri = wait_for_manual_antigravity_callback(
-            config,
-            callback_port,
-            callback_url=callback_url,
-        )
-    else:
-        code, redirect_uri = wait_for_antigravity_callback(config, callback_port, config.timeout * 10)
-    token_payload = exchange_antigravity_code(config, code, redirect_uri)
-    access_token = normalize(token_payload.get("access_token"))
-    email = fetch_antigravity_email(config, access_token)
-    metadata = refresh_metadata_from_token_payload(token_payload, {"type": PROVIDER_ANTIGRAVITY})
-    metadata["email"] = email
-    project_id = antigravity_project_id(config, metadata)
-    metadata["project_id"] = project_id
-    auth_path = expand_path(config.antigravity_auth_dir) / credential_file_name(email)
-    save_auth_metadata(auth_path, metadata)
-    return AntigravityLoginResult(auth_file=auth_path, email=email, project_id=project_id)
 
 
 def refresh_metadata_from_token_payload(
@@ -1243,15 +825,29 @@ def build_grok_headers(config: Config, token: str) -> dict[str, str]:
     }
 
 
+def build_grok_api_headers(config: Config, token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": config.grok_user_agent,
+    }
+
+
 def post_grok_responses(config: Config, query: str) -> dict[str, Any]:
     validate_grok_base_url(config)
-    metadata = load_grok_auth(config)
-    token = normalize(metadata.get("key"))
+    if config.grok_api_key:
+        token = config.grok_api_key
+        headers = build_grok_api_headers(config, token)
+    else:
+        metadata = load_grok_auth(config)
+        token = normalize(metadata.get("key"))
+        headers = build_grok_headers(config, token)
     endpoint = config.grok_base_url.rstrip("/") + GROK_RESPONSES_PATH
     request = urllib.request.Request(
         endpoint,
         data=json.dumps(grok_body(config, query)).encode("utf-8"),
-        headers=build_grok_headers(config, token),
+        headers=headers,
         method="POST",
     )
     try:
@@ -1452,19 +1048,10 @@ def parse_response(
 
 
 def validate_gemini_auth(config: Config) -> None:
-    if config.auth_mode == AUTH_API_KEY and not config.api_key:
+    if not config.api_key:
         raise ConfigError(
             "GROUNDFETCH_API_KEY is not set "
-            f"(looked in env and {ENV_FILE}); set GROUNDFETCH_AUTH=oauth "
-            "with GROUNDFETCH_OAUTH_TOKEN or GROUNDFETCH_OAUTH_TOKEN_COMMAND "
-            "to use OAuth"
-        )
-    if config.auth_mode == AUTH_OAUTH and not (
-        config.oauth_token or config.oauth_token_command
-    ):
-        raise ConfigError(
-            "OAuth auth requires GROUNDFETCH_OAUTH_TOKEN or "
-            "GROUNDFETCH_OAUTH_TOKEN_COMMAND"
+            f"(looked in env and {ENV_FILE})"
         )
 
 

@@ -4,7 +4,7 @@ Lightweight grounded web search for coding agents.
 
 GroundFetch calls grounded search providers and returns compact JSON results
 with source titles and URLs. It supports Gemini `generateContent`,
-Antigravity's Cloud Code PA wrapper, and Grok's CLI chat proxy Responses API.
+Antigravity's Cloud Code PA wrapper, and Grok's Responses API.
 It is designed for agent workflows that want source-backed web lookup without
 keeping an MCP server loaded.
 
@@ -56,32 +56,12 @@ GROUNDFETCH_API_KEY=...
 GROUNDFETCH_MODEL=gemini-3.1-flash-lite
 ```
 
-API key auth is the default. To use an OAuth access token instead:
+GroundFetch supports two kinds of authentication:
 
-```dotenv
-GROUNDFETCH_AUTH=oauth
-GROUNDFETCH_OAUTH_TOKEN=ya29...
-GROUNDFETCH_OAUTH_PROJECT=my-google-cloud-project
-```
-
-Or point GroundFetch at a credential helper that prints an access token to
-stdout:
-
-```dotenv
-GROUNDFETCH_AUTH=oauth
-GROUNDFETCH_OAUTH_TOKEN_COMMAND="gcloud auth application-default print-access-token"
-GROUNDFETCH_OAUTH_PROJECT=my-google-cloud-project
-```
-
-`GROUNDFETCH_OAUTH_PROJECT` is sent as `x-goog-user-project` when set, which is
-commonly required for Gemini API OAuth quota/billing. GroundFetch intentionally
-does not scrape private keyrings. If Antigravity or another OAuth login tool
-exposes a supported token-printing helper, set `GROUNDFETCH_OAUTH_TOKEN_COMMAND`
-to that command.
-
-When `GROUNDFETCH_AUTH` is omitted, OAuth is selected automatically if
-`GROUNDFETCH_OAUTH_TOKEN` or `GROUNDFETCH_OAUTH_TOKEN_COMMAND` is set; otherwise
-API key auth is used.
+1. **API keys** — a Gemini API key (above), or a Grok (xAI) API key.
+2. **Read OAuth files** — existing Antigravity (`agy`) and Grok CLI auth files
+   created by those tools' own login flows. GroundFetch reads them; it never runs
+   a login flow itself.
 
 Optional settings:
 
@@ -92,40 +72,15 @@ GROUNDFETCH_PROVIDER=gemini
 GROUNDFETCH_BASE_URL=https://generativelanguage.googleapis.com/v1beta
 GROUNDFETCH_TIMEOUT=30
 GROUNDFETCH_USER_AGENT=groundfetch/0.1
-GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT=10
 ```
 
-### Antigravity auth
+### Antigravity auth (read OAuth file)
 
-GroundFetch can also use Antigravity OAuth auth JSON files compatible with
-CLIProxyAPI.
-This sends requests to Antigravity's Cloud Code PA `v1internal:generateContent`
-endpoint instead of the standard Gemini API.
-
-Create an auth file directly:
-
-```bash
-export GROUNDFETCH_ANTIGRAVITY_CLIENT_ID='your-google-oauth-client-id'
-export GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET='your-google-oauth-client-secret'
-groundfetch --login-antigravity
-```
-
-For remote shells or browser sessions where localhost cannot call back into the
-script, use manual callback mode. GroundFetch prints the OAuth URL, you open it
-in any browser, then paste the final `http://localhost:.../oauth-callback?...`
-URL back into the script:
-
-```bash
-groundfetch --login-antigravity --antigravity-manual-callback
-```
-
-For non-interactive use, pass the final callback URL directly:
-
-```bash
-groundfetch --login-antigravity --antigravity-callback-url 'http://localhost:51121/oauth-callback?code=...&state=...'
-```
-
-Or create an Antigravity auth file with CLIProxyAPI. Then configure GroundFetch:
+GroundFetch reads existing Antigravity OAuth auth JSON files compatible with
+CLIProxyAPI and sends requests to Antigravity's Cloud Code PA
+`v1internal:generateContent` endpoint instead of the standard Gemini API. It does
+not run an Antigravity login itself — create the auth file with CLIProxyAPI (or
+another Antigravity login tool), then point GroundFetch at it:
 
 ```dotenv
 GROUNDFETCH_PROVIDER=antigravity
@@ -142,16 +97,17 @@ GROUNDFETCH_ANTIGRAVITY_CLIENT_ID=your-google-oauth-client-id
 GROUNDFETCH_ANTIGRAVITY_CLIENT_SECRET=your-google-oauth-client-secret
 ```
 
-GroundFetch uses existing Antigravity access tokens without OAuth client
-settings. The client id and secret are required only for `--login-antigravity`
-and for refreshing expired Antigravity access tokens with the stored
-`refresh_token`. It discovers `project_id` via `loadCodeAssist` when missing
-and falls back to `onboardUser` for first-use accounts.
+GroundFetch uses the stored Antigravity access token directly. The client id and
+secret are required only for refreshing an expired access token with the stored
+`refresh_token`. It discovers `project_id` via `loadCodeAssist` when missing and
+falls back to `onboardUser` for first-use accounts.
 
 ### Grok auth
 
-GroundFetch can use an existing Grok CLI login. Run `grok login` first; the CLI
-stores session credentials in `~/.grok/auth.json`. GroundFetch reads the active
+GroundFetch authenticates Grok in two ways.
+
+**Read the Grok CLI login (OAuth file).** Run `grok login` first; the CLI stores
+session credentials in `~/.grok/auth.json`. GroundFetch reads the active
 `https://auth.x.ai::<uuid>` entry, uses its `key` as a bearer token, and checks
 `expires_at`. Expired Grok tokens are not refreshed by GroundFetch; run
 `grok login` again.
@@ -165,11 +121,23 @@ GROUNDFETCH_GROK_USER_AGENT=grok-cli/0.2.54
 GROUNDFETCH_GROK_CLIENT_VERSION=0.2.54
 ```
 
-The Grok provider sends `POST /v1/responses` to the CLI chat proxy with
-`tools: [{"type":"web_search"}]`, `X-XAI-Token-Auth: xai-grok-cli`,
-`x-grok-model-override`, and `x-grok-client-version`. Results are parsed from
-`output_text.annotations` entries of type `url_citation`, with
-`web_search_call.action.sources` used as fallback source candidates.
+**Use a Grok (xAI) API key.** When `GROUNDFETCH_GROK_API_KEY` is set, GroundFetch
+sends a bearer-token request and skips the auth file. The base URL defaults to
+`https://api.x.ai/v1` (override with `GROUNDFETCH_GROK_BASE_URL`); set
+`GROUNDFETCH_GROK_MODEL` to a model your key can use.
+
+```dotenv
+GROUNDFETCH_PROVIDER=grok
+GROUNDFETCH_GROK_API_KEY=xai-...
+GROUNDFETCH_GROK_MODEL=grok-4
+```
+
+The Grok provider sends `POST /responses` with `tools: [{"type":"web_search"}]`.
+With the CLI auth file it adds `X-XAI-Token-Auth: xai-grok-cli`,
+`x-grok-model-override`, and `x-grok-client-version`; with an API key it sends
+only the bearer token. Results are parsed from `output_text.annotations` entries
+of type `url_citation`, with `web_search_call.action.sources` used as fallback
+source candidates.
 
 ### Provider aggregation
 

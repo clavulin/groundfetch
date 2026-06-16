@@ -50,37 +50,10 @@ class ConfigTests(unittest.TestCase):
             config = core.Config.from_env()
 
         self.assertEqual(config.api_key, "key")
-        self.assertEqual(config.auth_mode, core.AUTH_API_KEY)
         self.assertEqual(config.base_url, "https://example.test/v1beta")
         self.assertEqual(config.model, "model")
         self.assertEqual(config.timeout, 7)
         self.assertEqual(config.user_agent, "agent")
-
-    def test_config_reads_oauth_token_without_api_key(self):
-        env = {
-            "GROUNDFETCH_AUTH": "oauth",
-            "GROUNDFETCH_OAUTH_TOKEN": "token",
-            "GROUNDFETCH_OAUTH_PROJECT": "project",
-            "GROUNDFETCH_OAUTH_TOKEN_COMMAND_TIMEOUT": "3",
-        }
-        with mock.patch.dict(os.environ, env, clear=True):
-            config = core.Config.from_env()
-
-        self.assertEqual(config.api_key, "")
-        self.assertEqual(config.auth_mode, core.AUTH_OAUTH)
-        self.assertEqual(config.oauth_token, "token")
-        self.assertEqual(config.oauth_project, "project")
-        self.assertEqual(config.oauth_token_command_timeout, 3)
-
-    def test_config_auto_selects_oauth_when_token_command_is_set(self):
-        env = {
-            "GROUNDFETCH_OAUTH_TOKEN_COMMAND": "print-token",
-        }
-        with mock.patch.dict(os.environ, env, clear=True):
-            config = core.Config.from_env()
-
-        self.assertEqual(config.auth_mode, core.AUTH_OAUTH)
-        self.assertEqual(config.oauth_token_command, "print-token")
 
     def test_config_reads_antigravity_provider_without_api_key(self):
         env = {
@@ -121,6 +94,29 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.grok_user_agent, "grok-cli/test")
         self.assertEqual(config.grok_client_version, "0.2.test")
 
+    def test_config_grok_api_key_defaults_to_xai_api_base_url(self):
+        env = {
+            "GROUNDFETCH_PROVIDER": "grok",
+            "GROUNDFETCH_GROK_API_KEY": "xai-key",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = core.Config.from_env()
+
+        self.assertEqual(config.provider, core.PROVIDER_GROK)
+        self.assertEqual(config.grok_api_key, "xai-key")
+        self.assertEqual(config.grok_base_url, core.DEFAULT_GROK_API_BASE_URL)
+
+    def test_config_grok_api_key_keeps_explicit_base_url(self):
+        env = {
+            "GROUNDFETCH_PROVIDER": "grok",
+            "GROUNDFETCH_GROK_API_KEY": "xai-key",
+            "GROUNDFETCH_GROK_BASE_URL": "https://cli-chat-proxy.test/v1",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            config = core.Config.from_env()
+
+        self.assertEqual(config.grok_base_url, "https://cli-chat-proxy.test/v1")
+
     def test_config_reads_multi_provider_list(self):
         env = {
             "GROUNDFETCH_PROVIDERS": "gemini, grok, gemini",
@@ -152,7 +148,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.provider, core.PROVIDER_GEMINI)
         self.assertEqual(config.antigravity_auth_dir, "/tmp/auths")
 
-    def test_config_provider_override_wins_for_login(self):
+    def test_config_provider_override_wins(self):
         env = {
             "GROUNDFETCH_PROVIDER": "gemini",
         }
@@ -170,18 +166,10 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(core.ConfigError):
                 core.Config.from_env()
 
-    def test_config_rejects_oauth_without_token_or_command(self):
+    def test_config_ignores_legacy_oauth_env_vars(self):
         env = {
             "GROUNDFETCH_AUTH": "oauth",
-        }
-        with mock.patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(core.ConfigError):
-                core.Config.from_env()
-
-    def test_config_rejects_unknown_auth_mode(self):
-        env = {
-            "GROUNDFETCH_AUTH": "magic",
-            "GROUNDFETCH_API_KEY": "key",
+            "GROUNDFETCH_OAUTH_TOKEN": "ya29-token",
         }
         with mock.patch.dict(os.environ, env, clear=True):
             with self.assertRaises(core.ConfigError):
@@ -233,64 +221,6 @@ class AuthHeaderTests(unittest.TestCase):
 
         self.assertEqual(headers["x-goog-api-key"], "key")
         self.assertNotIn("Authorization", headers)
-
-    def test_build_headers_uses_oauth_token_and_project(self):
-        config = core.Config(
-            api_key="",
-            base_url="https://example.test/v1beta",
-            model="model",
-            timeout=1,
-            user_agent="agent",
-            auth_mode=core.AUTH_OAUTH,
-            oauth_token="token",
-            oauth_project="project",
-        )
-
-        headers = core.build_headers(config)
-
-        self.assertEqual(headers["Authorization"], "Bearer token")
-        self.assertEqual(headers["x-goog-user-project"], "project")
-        self.assertNotIn("x-goog-api-key", headers)
-
-    def test_build_headers_preserves_bearer_prefix(self):
-        config = core.Config(
-            api_key="",
-            base_url="https://example.test/v1beta",
-            model="model",
-            timeout=1,
-            user_agent="agent",
-            auth_mode=core.AUTH_OAUTH,
-            oauth_token="Bearer token",
-        )
-
-        headers = core.build_headers(config)
-
-        self.assertEqual(headers["Authorization"], "Bearer token")
-
-    def test_build_headers_runs_oauth_token_command(self):
-        config = core.Config(
-            api_key="",
-            base_url="https://example.test/v1beta",
-            model="model",
-            timeout=1,
-            user_agent="agent",
-            auth_mode=core.AUTH_OAUTH,
-            oauth_token_command="print-token --quiet",
-            oauth_token_command_timeout=2,
-        )
-        completed = mock.Mock(returncode=0, stdout="token\n", stderr="")
-
-        with mock.patch.object(core.subprocess, "run", return_value=completed) as run:
-            headers = core.build_headers(config)
-
-        self.assertEqual(headers["Authorization"], "Bearer token")
-        run.assert_called_once_with(
-            ["print-token", "--quiet"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
 
 
 class ProviderTimeoutTests(unittest.TestCase):
@@ -375,43 +305,7 @@ class ProviderTimeoutTests(unittest.TestCase):
 
 
 class AntigravityTests(unittest.TestCase):
-    def test_build_antigravity_auth_url_matches_google_oauth_shape(self):
-        config = core.Config(
-            api_key="",
-            base_url=core.DEFAULT_BASE_URL,
-            model="model",
-            timeout=1,
-            user_agent="agent",
-            provider=core.PROVIDER_ANTIGRAVITY,
-            antigravity_client_id="client-id",
-            antigravity_client_secret="client-secret",
-        )
-        url = core.build_antigravity_auth_url(
-            config,
-            "state",
-            "http://localhost:51121/oauth-callback",
-        )
-
-        parsed = core.urllib.parse.urlparse(url)
-        params = core.urllib.parse.parse_qs(parsed.query)
-
-        self.assertEqual(
-            f"{parsed.scheme}://{parsed.netloc}{parsed.path}",
-            core.ANTIGRAVITY_AUTH_ENDPOINT,
-        )
-        self.assertEqual(params["client_id"], ["client-id"])
-        self.assertEqual(params["response_type"], ["code"])
-        self.assertEqual(params["access_type"], ["offline"])
-        self.assertEqual(params["prompt"], ["consent"])
-        self.assertEqual(params["state"], ["state"])
-        self.assertEqual(
-            params["redirect_uri"],
-            ["http://localhost:51121/oauth-callback"],
-        )
-        for scope in core.ANTIGRAVITY_SCOPES:
-            self.assertIn(scope, params["scope"][0])
-
-    def test_antigravity_oauth_credentials_are_required_for_login_paths(self):
+    def test_antigravity_oauth_credentials_are_required_for_refresh(self):
         config = core.Config(
             api_key="",
             base_url=core.DEFAULT_BASE_URL,
@@ -421,52 +315,8 @@ class AntigravityTests(unittest.TestCase):
             provider=core.PROVIDER_ANTIGRAVITY,
         )
 
-        with self.assertRaises(core.ConfigError):
-            core.build_antigravity_auth_url(
-                config,
-                "state",
-                "http://localhost:51121/oauth-callback",
-            )
-
-    def test_wait_for_manual_antigravity_callback_parses_pasted_localhost_url(self):
-        config = core.Config(
-            api_key="",
-            base_url=core.DEFAULT_BASE_URL,
-            model="model",
-            timeout=1,
-            user_agent="agent",
-            provider=core.PROVIDER_ANTIGRAVITY,
-            antigravity_client_id="client-id",
-            antigravity_client_secret="client-secret",
-        )
-        output = StringIO()
-
-        with mock.patch.object(core.secrets, "token_urlsafe", return_value="state-token"):
-            code, redirect_uri = core.wait_for_manual_antigravity_callback(
-                config,
-                51121,
-                callback_url="http://localhost:51121/oauth-callback?code=auth-code&state=state-token",
-                output_stream=output,
-            )
-
-        self.assertEqual(code, "auth-code")
-        self.assertEqual(redirect_uri, "http://localhost:51121/oauth-callback")
-        self.assertIn("Open this URL", output.getvalue())
-        self.assertIn("state=state-token", output.getvalue())
-
-    def test_parse_oauth_callback_accepts_query_string_only(self):
-        callback = core.parse_oauth_callback("code=auth-code&state=state-token")
-
-        self.assertEqual(callback.code, "auth-code")
-        self.assertEqual(callback.state, "state-token")
-
-    def test_parse_oauth_callback_rejects_state_mismatch(self):
-        callback = core.parse_oauth_callback(
-            "http://localhost:51121/oauth-callback?code=auth-code&state=wrong"
-        )
-
-        with self.assertRaises(core.ConfigError):
-            core.validate_antigravity_callback(callback, "state-token")
+        with self.assertRaisesRegex(core.ConfigError, "GROUNDFETCH_ANTIGRAVITY_CLIENT_ID"):
+            core.refresh_antigravity_auth(config, {"refresh_token": "refresh"})
 
     def test_load_antigravity_auth_requires_explicit_auth_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -694,111 +544,6 @@ class AntigravityTests(unittest.TestCase):
         post.assert_called_once_with(config, "hello")
         self.assertEqual(result["providersUsed"], ["antigravity"])
 
-    def test_login_antigravity_saves_cli_proxy_compatible_auth_file(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = core.Config(
-                api_key="",
-                base_url=core.DEFAULT_BASE_URL,
-                model="model",
-                timeout=1,
-                user_agent="agent",
-                provider=core.PROVIDER_ANTIGRAVITY,
-                antigravity_auth_dir=tmpdir,
-                antigravity_client_id="client-id",
-                antigravity_client_secret="client-secret",
-            )
-
-            with (
-                mock.patch.object(
-                    core,
-                    "wait_for_antigravity_callback",
-                    return_value=("code", "http://localhost:51121/oauth-callback"),
-                ) as wait,
-                mock.patch.object(
-                    core,
-                    "exchange_antigravity_code",
-                    return_value={
-                        "access_token": "token",
-                        "refresh_token": "refresh",
-                        "expires_in": 3600,
-                    },
-                ) as exchange,
-                mock.patch.object(
-                    core,
-                    "fetch_antigravity_email",
-                    return_value="user@example.test",
-                ) as email,
-                mock.patch.object(
-                    core,
-                    "antigravity_project_id",
-                    return_value="project",
-                ) as project,
-            ):
-                result = core.login_antigravity(config, callback_port=51121)
-
-            saved = json.loads(result.auth_file.read_text(encoding="utf-8"))
-
-        wait.assert_called_once_with(config, 51121, 10)
-        exchange.assert_called_once_with(config, "code", "http://localhost:51121/oauth-callback")
-        email.assert_called_once_with(config, "token")
-        project.assert_called_once()
-        self.assertEqual(result.email, "user@example.test")
-        self.assertEqual(result.project_id, "project")
-        self.assertEqual(result.auth_file.name, "antigravity-user@example.test.json")
-        self.assertEqual(saved["type"], "antigravity")
-        self.assertEqual(saved["access_token"], "token")
-        self.assertEqual(saved["refresh_token"], "refresh")
-        self.assertEqual(saved["email"], "user@example.test")
-        self.assertEqual(saved["project_id"], "project")
-
-    def test_login_antigravity_manual_callback_uses_pasted_url_path(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = core.Config(
-                api_key="",
-                base_url=core.DEFAULT_BASE_URL,
-                model="model",
-                timeout=1,
-                user_agent="agent",
-                provider=core.PROVIDER_ANTIGRAVITY,
-                antigravity_auth_dir=tmpdir,
-                antigravity_client_id="client-id",
-                antigravity_client_secret="client-secret",
-            )
-
-            with (
-                mock.patch.object(
-                    core,
-                    "wait_for_manual_antigravity_callback",
-                    return_value=("code", "http://localhost:51121/oauth-callback"),
-                ) as manual_wait,
-                mock.patch.object(core, "wait_for_antigravity_callback") as server_wait,
-                mock.patch.object(
-                    core,
-                    "exchange_antigravity_code",
-                    return_value={
-                        "access_token": "token",
-                        "refresh_token": "refresh",
-                        "expires_in": 3600,
-                    },
-                ),
-                mock.patch.object(core, "fetch_antigravity_email", return_value="user@example.test"),
-                mock.patch.object(core, "antigravity_project_id", return_value="project"),
-            ):
-                result = core.login_antigravity(
-                    config,
-                    callback_port=51121,
-                    manual_callback=True,
-                    callback_url="http://localhost:51121/oauth-callback?code=code&state=state",
-                )
-
-        manual_wait.assert_called_once_with(
-            config,
-            51121,
-            callback_url="http://localhost:51121/oauth-callback?code=code&state=state",
-        )
-        server_wait.assert_not_called()
-        self.assertEqual(result.email, "user@example.test")
-
 
 class GrokTests(unittest.TestCase):
     def test_load_grok_auth_picks_active_token(self):
@@ -1022,6 +767,40 @@ class GrokTests(unittest.TestCase):
         self.assertEqual(seen["body"]["stream"], False)
         self.assertEqual(seen["timeout"], 1)
 
+    def test_post_grok_responses_uses_api_key_without_auth_file(self):
+        config = core.Config(
+            api_key="",
+            base_url=core.DEFAULT_BASE_URL,
+            model="model",
+            timeout=1,
+            user_agent="agent",
+            provider=core.PROVIDER_GROK,
+            grok_auth_file="/does/not/exist.json",
+            grok_api_key="xai-key",
+            grok_base_url=core.DEFAULT_GROK_API_BASE_URL,
+            grok_model="grok-test",
+            grok_user_agent="grok-cli/test",
+            grok_client_version="0.2.test",
+        )
+        seen = {}
+
+        def fake_urlopen(request, timeout):
+            seen["url"] = request.full_url
+            seen["headers"] = dict(request.header_items())
+            seen["body"] = json_loads(request.data)
+            return FakeResponse(b'{"output":[]}')
+
+        with mock.patch.object(core.urllib.request, "urlopen", side_effect=fake_urlopen):
+            payload = core.post_grok_responses(config, "hello")
+
+        self.assertEqual(payload, {"output": []})
+        self.assertEqual(seen["url"], "https://api.x.ai/v1/responses")
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer xai-key")
+        self.assertNotIn("X-xai-token-auth", seen["headers"])
+        self.assertNotIn("X-grok-model-override", seen["headers"])
+        self.assertEqual(seen["body"]["model"], "grok-test")
+        self.assertEqual(seen["body"]["input"], "hello")
+
     def test_parse_grok_response_uses_citations_then_search_sources(self):
         payload = {
             "output": [
@@ -1118,69 +897,6 @@ class GrokTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def test_cli_login_antigravity_prints_result_json(self):
-        result = core.AntigravityLoginResult(
-            auth_file=Path("/tmp/antigravity-user@example.test.json"),
-            email="user@example.test",
-            project_id="project",
-        )
-        stdout = StringIO()
-
-        with (
-            mock.patch.object(cli, "load_default_env"),
-            mock.patch.object(cli.Config, "from_env") as from_env,
-            mock.patch.object(cli, "login_antigravity", return_value=result) as login,
-            redirect_stdout(stdout),
-        ):
-            status = cli.main(["--login-antigravity", "--antigravity-callback-port", "0"])
-
-        payload = json.loads(stdout.getvalue())
-        self.assertEqual(status, 0)
-        from_env.assert_called_once_with(provider_override="antigravity")
-        login.assert_called_once_with(
-            from_env.return_value,
-            callback_port=0,
-            manual_callback=False,
-            callback_url="",
-        )
-        self.assertEqual(payload["success"], True)
-        self.assertEqual(payload["provider"], "antigravity")
-        self.assertEqual(payload["authFile"], "/tmp/antigravity-user@example.test.json")
-        self.assertEqual(payload["email"], "user@example.test")
-        self.assertEqual(payload["projectId"], "project")
-
-    def test_cli_login_antigravity_passes_manual_callback_args(self):
-        result = core.AntigravityLoginResult(
-            auth_file=Path("/tmp/antigravity-user@example.test.json"),
-            email="user@example.test",
-            project_id="project",
-        )
-        stdout = StringIO()
-        callback_url = "http://localhost:51121/oauth-callback?code=code&state=state"
-
-        with (
-            mock.patch.object(cli, "load_default_env"),
-            mock.patch.object(cli.Config, "from_env") as from_env,
-            mock.patch.object(cli, "login_antigravity", return_value=result) as login,
-            redirect_stdout(stdout),
-        ):
-            status = cli.main(
-                [
-                    "--login-antigravity",
-                    "--antigravity-manual-callback",
-                    "--antigravity-callback-url",
-                    callback_url,
-                ]
-            )
-
-        self.assertEqual(status, 0)
-        login.assert_called_once_with(
-            from_env.return_value,
-            callback_port=51121,
-            manual_callback=True,
-            callback_url=callback_url,
-        )
-
     def test_cli_provider_override_accepts_comma_list(self):
         stdout = StringIO()
         result = {
